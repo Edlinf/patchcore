@@ -1,0 +1,10 @@
+method: patchcore
+backbone: resnet18
+job_no: &job_no !var job_no
+feature_indices: [2,3]
+image_size: !var image_size
+f_coreset: 0.10
+coreset_eps: 0.90
+output: 
+    model_dir: !join ['/opt/data/private/dataset/model/','20',!slice [*job_no,0,4],'/',!slice [*job_no,4,6]]
+    model_name: !join ['patchcore_',*job_no,'_{fmap_size}_{image_shape}_{sha}.pth']

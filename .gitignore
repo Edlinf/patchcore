@@ -1,0 +1,9 @@
+notebooks/
+results/
+results-predict/
+outputs/
+hub/
+datasets/
+.idea/
+*.spec
+__pycache__/

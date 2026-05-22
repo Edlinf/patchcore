@@ -1,0 +1,1 @@
+python3 ./indad/run.py patchcore --backbone resnet18 --feature_indices 2,3 --dataset_dir ./datasets --dataset KSJB.SC12-24-4.5 --image_size 224

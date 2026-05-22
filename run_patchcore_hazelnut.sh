@@ -1,0 +1,1 @@
+python3 ./indad/run.py patchcore --dataset_dir ./datasets --dataset hazelnut_reduced
