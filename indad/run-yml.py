@@ -12,7 +12,7 @@ import cv2
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from job_ini import JobIni
-from data import MVTecDataset, mvtec_classes
+from data import MVTecDataset
 from models import SPADE, PaDiM, PatchCore
 from utils import print_and_export_results, write_file
 
@@ -32,7 +32,6 @@ np.random.seed(0)
 import warnings # for some torch warnings regarding depreciation
 warnings.filterwarnings("ignore")
 
-ALL_CLASSES = mvtec_classes()
 ALLOWED_METHODS = ["spade", "padim", "patchcore"]
 DEFAULT_FEATURE_INDICES = {
 	"spade" : "1,2,3,-1",

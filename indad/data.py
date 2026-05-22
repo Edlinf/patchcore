@@ -18,48 +18,14 @@ DATASETS_PATH = Path("./datasets")
 IMAGENET_MEAN = tensor([.485, .456, .406])
 IMAGENET_STD = tensor([.229, .224, .225])
 
-def mvtec_classes():
-    return [
-        "bottle",
-        "cable",
-        "capsule",
-        "carpet",
-        "grid",
-        "hazelnut",
-        "leather",
-        "metal_nut",
-        "pill",
-        "screw",
-        "tile",
-        "toothbrush",
-        "transistor",
-        "wood",
-        "zipper",
-    ]
-
 class MVTecDataset:
     def __init__(self, cls : str, size : int = 224, dataset_dir: str = './datasets', resize_method: str = 'transform'):
         self.cls = cls
         self.size = size
         self.pin_memory = False
-        if cls in mvtec_classes():
-            self._download()
         #训练集和测试集使用的图像缩放方法必须一致，使用中发现如果训练集用 transform, 测试集用cv2，会出现测试效果很差的情况
         self.train_ds = MVTecTrainDataset(cls, size, dataset_dir=dataset_dir, resize_method=resize_method)
         self.test_ds = MVTecTestDataset(cls, size, dataset_dir=dataset_dir, resize_method=resize_method)
-
-    def _download(self):
-        dataset_dir = Path(self.dataset_dir)
-        if not isdir(dataset_dir / self.cls):
-            print(f"   Could not find '{self.cls}' in '{dataset_dir}/'. Downloading ... ")
-            url = f"ftp://guest:GU.205dldo@ftp.softronics.ch/mvtec_anomaly_detection/{self.cls}.tar.xz"
-            wget.download(url)
-            with tarfile.open(f"{self.cls}.tar.xz") as tar:
-                tar.extractall(dataset_dir)
-            os.remove(f"{self.cls}.tar.xz")
-            print("") # force newline
-        else:
-            print(f"   Found '{self.cls}' in '{dataset_dir}/'\n")
 
     def get_datasets(self):
         return self.train_ds, self.test_ds

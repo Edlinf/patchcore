@@ -399,10 +399,13 @@ class PatchCore(KNNExtractor):
             save_tensor(self.results_dir,'patch_lib.ts',self.patch_lib)
         
     def load(self, path: str,fmap_size: list):
-        ts = torch.load(path)
+        # Training saves the patch library as a TorchScript archive via
+        # `torch.jit.script(...).save(...)`, so we should load it with
+        # `torch.jit.load(...)` instead of `torch.load(...)`.
+        ts = torch.jit.load(path, map_location="cpu")
         par = ts.named_parameters()
-        for key,value in par:
-            self.patch_lib = value
+        for key, value in par:
+            self.patch_lib = value.detach()
             self.patch_lib.requires_grad_(False)
             break
         self.resize = torch.nn.AdaptiveAvgPool2d(fmap_size)
