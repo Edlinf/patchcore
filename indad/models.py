@@ -52,6 +52,84 @@ def print_tensor(x,num):
     for i in range(num):
         print(i,t[i].item())
 
+def mask_to_polygon(mask, epsilon=2.0, close=True, threshold=127):
+    """
+    mask: HxW, uint8, 0/255 二值图
+    epsilon: Douglas-Peucker 近似精度（像素）
+    close:   是否返回首尾闭合的多边形 (True/False)
+    return:  list[np.ndarray] 每个元素 shape (N,2) float32
+    """
+    # 1. 预处理
+    mask = (mask > threshold).astype(np.uint8) * 255
+
+    # 2. 找轮廓
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    polygons = []
+    for cnt in contours:
+        if len(cnt) < 3:          # 面积太小直接跳过
+            continue
+        # 3. DP 近似，提高阈值可以减少顶点数量
+        peri = cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, epsilon * peri * 0.01, True)
+        pts = approx.squeeze()    # (N,2)
+        if len(pts) < 3:
+            continue
+        if close and not np.all(pts[0] == pts[-1]):
+            pts = np.vstack([pts, pts[0]])
+        polygons.append(pts.astype(np.float32))
+    return polygons
+
+def polys_to_rects(polygons):
+    """
+    polygons: list[np.ndarray] 每个元素 shape (N,2) float32
+    return:   list[np.ndarray] 每个元素 shape (4,2) float32
+    """
+    rects = []
+    for pts in polygons:
+        x, y, w, h = cv2.boundingRect(pts)
+        rects.append(np.array([[x,y],[x+w,y],[x+w,y+h],[x,y+h]], dtype=np.float32))
+    return rects
+
+def save_smap_image2(results_dir,img_path,sample,score,s_map,predict_time):
+    threshold = 224
+    
+    #获取图片所在文件目录，文件名称
+    filename=os.path.basename(img_path)
+    filename=filename.split('.')[0]
+    #获取图片分类名称
+    classname=os.path.basename(os.path.dirname(img_path))
+    #分数转字符串
+    scorename = "{:.2f}".format( score.item() )
+    predict_time_str = "{:.0f}".format( predict_time*1000 )
+    #分割图路径
+    smap_path = os.path.join(results_dir,classname + '_' + filename  + '_' +  scorename + '_' + predict_time_str + 'ms.jpg')
+    
+
+    img = tensor_to_img(sample[0], normalize=True)
+    img = (img * 255).astype(np.uint8)
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    # heatmap = np.transpose(heatmap, (1,2,0))
+    # heatmap = s_map  / np.max(s_map)
+    s_map = pred_to_img(s_map).cpu().numpy().squeeze()
+    heatmap = (s_map * 255).astype(np.uint8)
+    heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+    result = cv2.addWeighted(heatmap_color, 0.5, img, 0.5, 0)
+    # cv2.imwrite(smap_path, result)
+
+    polys = mask_to_polygon(heatmap, epsilon=1.5, threshold=threshold)
+    rects = polys_to_rects(polys)
+    
+    # 画多边形和矩形
+    for p in polys:
+        cv2.polylines(result, [p.astype(int)], isClosed=True, color=(0,0,255), thickness=2)
+    for rect in rects:
+        cv2.polylines(result, [rect.astype(int)], isClosed=True, color=(0,255,0), thickness=2)
+    
+    stackimg = cv2.vconcat([img,result])
+
+    cv2.imwrite(smap_path, stackimg)
+
 def save_smap_image(results_dir,img_path,score,s_map,predict_time):
     #获取图片所在文件目录，文件名称
     filename=os.path.basename(img_path)
@@ -118,7 +196,7 @@ class KNNExtractor(torch.nn.Module):
 
     def evaluate(self, test_dl: DataLoader) -> Tuple[float, float]:
         """Calls predict step for each test sample."""
-        '''
+        
         image_preds = []
         image_labels = []
         image_labels_set = set()
@@ -151,8 +229,8 @@ class KNNExtractor(torch.nn.Module):
             pixel_rocauc = -1
 
         return image_rocauc, pixel_rocauc
-        '''
-        return -1,-1
+        
+        # return -1,-1
 
     def get_parameters(self, extra_params : dict = None) -> dict:
         return {
@@ -324,7 +402,8 @@ class PatchCore(KNNExtractor):
         max_feature_count: int = 0,
         start_pos: int = 0, 
         end_pos: int = 0,
-		jobini = None
+		jobini = None,
+        match_mode: str = "same_row" #global | same_row | exact_position
     ):
         super().__init__(
             backbone_name=backbone_name,
@@ -341,6 +420,7 @@ class PatchCore(KNNExtractor):
         self.average = torch.nn.AvgPool2d(3, stride=1)
         self.blur = GaussianBlur(4)
         self.n_reweight = 3
+        self.match_mode = match_mode
 
         self.patch_lib = []
         self.largest_fmap_size = None
@@ -367,35 +447,111 @@ class PatchCore(KNNExtractor):
                 self.resize = torch.nn.AdaptiveAvgPool2d(self.largest_fmap_size)
             resized_maps = [self.resize(self.average(fmap)) for fmap in feature_maps]
             patch = torch.cat(resized_maps, 1)#patch [1, 384, 32, 32] [1,C1+C2, H, W]
-            
-            width = self.largest_fmap_size[1]
+            # width = self.largest_fmap_size[1]
             # patch = patch[:,:,:,int(0.1*width):int(0.9*width)] #去掉左右10%的patch
             if self.start_pos != 0 or self.end_pos !=0:
                 patch = patch[:, :, :, int(self.start_pos / 8) : int(self.end_pos / 8)]
-
-            patch = patch.reshape(patch.shape[1], -1).T #[1024, 384]
-            self.patch_lib.append(patch)
             
+            if self.match_mode == "global":
+                patch = patch.reshape(patch.shape[1], -1).T #[1024, 384]
+                self.patch_lib.append(patch)
+            elif self.match_mode == "same_row":
+                patch = patch.permute(0,2,3,1)
+                patch = patch.reshape(patch.shape[1], -1, patch.shape[-1]) # [32, 32, 384]
+                self.patch_lib.append(patch)
+            elif self.match_mode == "exact_position":
+                patch = patch.permute(0,2,3,1)
+                patch = patch.reshape(patch.shape[1],patch.shape[2], -1, patch.shape[-1]) # [32, 32, 1, 384]
+                self.patch_lib.append(patch)
+
             if self.jobini is not None:
                 self.jobini.set_exec_progress(10 + (idx / len_ds) * 20)  # ?
+        
+        print('patch shape:',patch.shape)
+        if self.match_mode == "global":
+            self.patch_lib = torch.cat(self.patch_lib, 0) # [1024*len_ds, 384]
+        elif self.match_mode == "same_row":
+            self.patch_lib = torch.cat(self.patch_lib, 1) # [32, 32*len_ds, 384]
+        elif self.match_mode == "exact_position":
+            self.patch_lib = torch.cat(self.patch_lib, 2) # [32, 32, len_ds, 384]
 
-        self.patch_lib = torch.cat(self.patch_lib, 0)
+        print('patch_lib shape:',self.patch_lib.shape)
 
         # progress: 30 -> 95
         if self.f_coreset < 1:
-            if self.max_feature_count == 0:
-                # n = int(self.f_coreset * self.patch_lib.shape[0])   # RESERVED
-                n = min(int(self.f_coreset * self.patch_lib.shape[0]), 60000)
-            else:
-                n = min(int(self.f_coreset * self.patch_lib.shape[0]), self.max_feature_count)
+            if self.match_mode == "global":
+                if self.max_feature_count == 0:
+                    n = min(int(self.f_coreset * self.patch_lib.shape[0]), 60000)
+                else:
+                    n = min(int(self.f_coreset * self.patch_lib.shape[0]), self.max_feature_count)
+                    
+                self.coreset_idx = get_coreset_idx_randomp(
+                    self.patch_lib,
+                    n,
+                    eps=self.coreset_eps,
+                    jobini=self.jobini
+                )
+                self.patch_lib = self.patch_lib[self.coreset_idx]
+            elif self.match_mode == "same_row":
+                H = self.patch_lib.shape[0]
+                if self.max_feature_count == 0:
+                    n = min(int(self.f_coreset * self.patch_lib.shape[1]), 60000//H)
+                else:
+                    n = min(int(self.f_coreset * self.patch_lib.shape[1]), self.max_feature_count//H)
+                n = max(n, 1) # at least 1 patch per position, otherwise SparseRandomProjection will complain.
+                # 输入大小:[W, N, C] 对每一行进行采样子集
+                sampled_rows = []
+                for h in range(H):
+                    row_lib = self.patch_lib[h]  # [W*N_train, C]
+                    # 行内 patch 数 <= n 时跳过 coreset，避免 SparseRandomProjection 出错
+                    if row_lib.shape[0] <= n:
+                        sampled_rows.append(row_lib)
+                    else:
+                        idx = get_coreset_idx_randomp(
+                            row_lib,
+                            n,
+                            eps=self.coreset_eps,
+                            jobini=None,    # 子任务进度不上报，避免反复刷 ini
+                        )
+                        sampled_rows.append(row_lib[idx])
+                    
+                    # 上报每行的总进度 30 -> 95
+                    if self.jobini is not None:
+                        self.jobini.set_exec_progress(30 + ((h+1) / H) * 65)
                 
-            self.coreset_idx = get_coreset_idx_randomp(
-                self.patch_lib,
-                n,
-                eps=self.coreset_eps,
-                jobini=self.jobini
-            )
-            self.patch_lib = self.patch_lib[self.coreset_idx]
+                self.patch_lib = torch.stack(sampled_rows, dim=0)  # [H, n, C]
+            elif self.match_mode == "exact_position":
+                H = self.patch_lib.shape[0]
+                W = self.patch_lib.shape[1]
+                if self.max_feature_count == 0:
+                    n = min(int(self.f_coreset * self.patch_lib.shape[2]), 60000//(H*W))
+                else:
+                    n = min(int(self.f_coreset * self.patch_lib.shape[2]), self.max_feature_count//(H*W))
+                n = max(n, 1) # at least 1 patch per position, otherwise SparseRandomProjection will complain.
+                # 输入大小:[H, W, N, C] 对每个位置进行采样子集
+                sampled_positions = []
+                for h in range(H):
+                    for w in range(W):
+                        pos_lib = self.patch_lib[h, w]  # [N_train, C]
+                        # 位置内 patch 数 <= n 时跳过 coreset，避免 SparseRandomProjection 出错
+                        if pos_lib.shape[0] <= n:
+                            sampled_positions.append(pos_lib)
+                        else:
+                            idx = get_coreset_idx_randomp(
+                                pos_lib,
+                                n,
+                                eps=self.coreset_eps,
+                                jobini=None,    # 子任务进度不上报，避免反复刷 ini
+                            )
+                            sampled_positions.append(pos_lib[idx])
+                        
+                        # 上报每个位置的总进度 30 -> 95
+                        if self.jobini is not None:
+                            total_positions = H * W
+                            current_position = h * W + w + 1
+                            self.jobini.set_exec_progress(30 + (current_position / total_positions) * 65)
+                self.patch_lib = torch.stack(sampled_positions, dim=0).reshape(H, W, -1, self.patch_lib.shape[-1])
+            print('coreset size:',self.patch_lib.shape)
             save_tensor(self.results_dir,'patch_lib.ts',self.patch_lib)
         
     def load(self, path: str,fmap_size: list):
@@ -419,30 +575,38 @@ class PatchCore(KNNExtractor):
         resized_maps = [self.resize(self.average(fmap)) for fmap in feature_maps]
 
         patch = torch.cat(resized_maps, 1) #patch [1, 384, 32, 32] [1,C1+C2, H, W]
-
+        
+        if self.start_pos != 0 or self.end_pos !=0: # start_pos / end_pos 裁剪
+            patch = patch[:, :, :, int(self.start_pos / 8) : int(self.end_pos / 8)]
+        
+        fmap_h, fmap_w = patch.shape[-2], patch.shape[-1]  # 记录特征图空间尺寸（裁剪后）
+        
         patch = patch.to(device)
-        patch = patch.reshape(patch.shape[1], -1).T
         self.patch_lib = self.patch_lib.to(device)
         
-        dist = torch.cdist(patch, self.patch_lib)
-        min_val, min_idx = torch.min(dist, dim=1)
+        if self.match_mode == "global":
+            # patch = patch.reshape(patch.shape[1], -1).T
+            patch = patch.permute(0, 2, 3, 1).reshape(-1, patch.shape[1]) # [H*W, C]
+            dist = torch.cdist(patch, self.patch_lib)   # [H*W, N]
+            min_val, min_idx = torch.min(dist, dim=1)        
+            
+        elif self.match_mode == "same_row":
+            patch = patch.permute(0, 2, 3, 1).squeeze(0)   # [H, W, C]
+            # patch: [H, W, C], self.patch_lib: [H, N_row, C]
+            dist = torch.cdist(patch, self.patch_lib) # [H, W, N_row]
+            min_val, min_idx = torch.min(dist, dim=2) # [H, W]
+            min_val = min_val.reshape(-1)       # [H*W]
+
+        elif self.match_mode == "exact_position":
+            patch = patch.permute(0, 2, 3, 1).squeeze(0).unsqueeze(2)   # [H, W, 1, C]
+            # patch: [H, W, 1, C], self.patch_lib: [H, W, N_pos, C]
+            dist = torch.cdist(patch, self.patch_lib) # [H, W, 1, N_pos]
+            min_val, min_idx = torch.min(dist, dim=-1) # [H, W, 1]
+            min_val = min_val.reshape(-1)       # [H*W]
+
         s_idx = torch.argmax(min_val)
         s_star = torch.max(min_val)
-        
-        # reweighting
-        m_test = patch[s_idx].unsqueeze(0) # anomalous patch
-        m_star = self.patch_lib[min_idx[s_idx]].unsqueeze(0) # closest neighbour
-        w_dist = torch.cdist(m_star, self.patch_lib) # find knn to m_star pt.1
-        _, nn_idx = torch.topk(w_dist, k=self.n_reweight, largest=False) # pt.2
-        # equation 7 from the paper
-        m_star_knn = torch.linalg.norm(m_test-self.patch_lib[nn_idx[0,1:]], dim=1)
-        # Softmax normalization trick as in transformers.
-        # As the patch vectors grow larger, their norm might differ a lot.
-        # exp(norm) can give infinities.
-        D = torch.sqrt(torch.tensor(patch.shape[1]))
-        w = 1-(torch.exp(s_star/D)/(torch.sum(torch.exp(m_star_knn/D))))
-        s = w*s_star
-        s = s.cpu()
+        s = s_star.cpu()
 
         if isinstance(self.smap_size, int):
             width, height = self.smap_size, self.smap_size
@@ -450,14 +614,13 @@ class PatchCore(KNNExtractor):
             width, height = self.smap_size[0], self.smap_size[1]
         else:
             raise ValueError(f'Invalid smap_size: {self.smap_size}')
-            
+
+        if self.start_pos != 0 or self.end_pos !=0: # start_pos / end_pos 裁剪
+            width = int(self.end_pos) - int(self.start_pos)
+            sample = sample[:, :, :, int(self.start_pos) : int(self.end_pos)]
+
         # # segmentation map
-        s_map = min_val.view(1,1,*feature_maps[0].shape[-2:])
-        """
-        s_map = torch.nn.functional.interpolate(
-            s_map, size=(self.smap_size,self.smap_size), mode='bilinear'
-        )
-        """
+        s_map = min_val.view(1,1, fmap_h, fmap_w)
         s_map = torch.nn.functional.interpolate(
             s_map, size=(height, width), mode='bilinear'
         )
@@ -466,8 +629,8 @@ class PatchCore(KNNExtractor):
 
         # save smap image
         end_time = timeit.default_timer()
-        save_smap_image(self.results_dir, path, s, s_map, end_time - start_time)
-        
+        # save_smap_image(self.results_dir, path, s, s_map, end_time - start_time)
+        save_smap_image2(self.results_dir, path, sample, s, s_map, end_time - start_time)
         return s, s_map
 
 
