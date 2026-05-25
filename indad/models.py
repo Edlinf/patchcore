@@ -567,7 +567,7 @@ class PatchCore(KNNExtractor):
         self.resize = torch.nn.AdaptiveAvgPool2d(fmap_size)
         return True
 
-    def predict(self, sample, path: str):
+    def predict(self, sample, path: str, neighbor_radius: int = 1):
         start_time = timeit.default_timer()
         feature_maps = self(sample) #sample [1,3,256,256] feature_maps [(1, C1, 32, 32), (1, C2, 16, 16)]
         if self.image_shape is None:
@@ -593,13 +593,38 @@ class PatchCore(KNNExtractor):
         elif self.match_mode == "same_row":
             patch = patch.permute(0, 2, 3, 1).squeeze(0)   # [H, W, C]
             # patch: [H, W, C], self.patch_lib: [H, N_row, C]
-            dist = torch.cdist(patch, self.patch_lib) # [H, W, N_row]
-            min_val, min_idx = torch.min(dist, dim=2) # [H, W]
-            min_val = min_val.reshape(-1)       # [H*W]
+            H, N_row, C = self.patch_lib.shape
+            r = neighbor_radius
+            if r == 0:
+                dist = torch.cdist(patch, self.patch_lib) # [H, W, N_row]
+                min_val, min_idx = torch.min(dist, dim=2) # [H, W]
+                min_val = min_val.reshape(-1)       # [H*W]
+            else:
+                lib_pad = torch.nn.functional.pad(
+                    self.patch_lib.permute(1, 2, 0),  # [N_row, C, H]
+                    (r, r), mode='replicate'
+                ).permute(2, 0, 1)                       # [H+2r, N_row, C]
+                # 每行 h 取邻域 [h-r, h+r]，合并成 (2r+1)*N_row 个候选
+                # 用 unfold: lib_pad[h:h+2r+1] 是该行的候选
+                # 一次性构造 [H, (2r+1)*N_row, C]
+                K = 2*r+1
+                lib_pad = lib_pad.unfold(0, K, 1) # [H+2r, N_row, C] -> [H, N_row, C, K]
+                lib_pad = lib_pad.permute(0, 3, 1, 2).contiguous() # [H, K, N_row, C]
+                lib_pad = lib_pad.reshape(H, K * N_row, C)     # [H, K*N_row, C]
+
+                # patch: [H, W, C], self.patch_lib: [H, K*N_row, C]
+                print('patch shape:', patch.shape, 'patch_lib shape:', lib_pad.shape)
+                dist = torch.cdist(patch, lib_pad) # [H, W, K*N_row]
+                min_val, min_idx = torch.min(dist, dim=2) # [H, W]
+                min_val = min_val.reshape(-1)       # [H*W]
 
         elif self.match_mode == "exact_position":
             patch = patch.permute(0, 2, 3, 1).squeeze(0).unsqueeze(2)   # [H, W, 1, C]
             # patch: [H, W, 1, C], self.patch_lib: [H, W, N_pos, C]
+            H, W, N_pos, C = self.patch_lib.shape
+            r = neighbor_radius
+            
+            
             dist = torch.cdist(patch, self.patch_lib) # [H, W, 1, N_pos]
             min_val, min_idx = torch.min(dist, dim=-1) # [H, W, 1]
             min_val = min_val.reshape(-1)       # [H*W]
