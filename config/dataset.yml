@@ -3,7 +3,7 @@ method: patchcore
 backbone: resnet18
 f_coreset: 0.1
 dataset_dir: ./datasets
-image_size: 224
-dataset: hazelnut
+image_size: [5120, 64] #
+dataset: rubberring
 result_dir: ./results
 output_name: ###
