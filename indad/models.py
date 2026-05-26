@@ -403,7 +403,7 @@ class PatchCore(KNNExtractor):
         start_pos: int = 0, 
         end_pos: int = 0,
 		jobini = None,
-        match_mode: str = "same_row" #global | same_row | exact_position
+        match_mode: str = "exact_position" #global | same_row | exact_position
     ):
         super().__init__(
             backbone_name=backbone_name,
@@ -453,15 +453,15 @@ class PatchCore(KNNExtractor):
                 patch = patch[:, :, :, int(self.start_pos / 8) : int(self.end_pos / 8)]
             
             if self.match_mode == "global":
-                patch = patch.reshape(patch.shape[1], -1).T #[1024, 384]
+                patch = patch.reshape(patch.shape[1], -1).T #[H*W, 384]
                 self.patch_lib.append(patch)
             elif self.match_mode == "same_row":
                 patch = patch.permute(0,2,3,1)
-                patch = patch.reshape(patch.shape[1], -1, patch.shape[-1]) # [32, 32, 384]
+                patch = patch.reshape(patch.shape[1], -1, patch.shape[-1]) # [H, W, 384]
                 self.patch_lib.append(patch)
             elif self.match_mode == "exact_position":
                 patch = patch.permute(0,2,3,1)
-                patch = patch.reshape(patch.shape[1],patch.shape[2], -1, patch.shape[-1]) # [32, 32, 1, 384]
+                patch = patch.reshape(patch.shape[1],patch.shape[2], -1, patch.shape[-1]) # [H, W, 1, 384]
                 self.patch_lib.append(patch)
 
             if self.jobini is not None:
@@ -469,11 +469,11 @@ class PatchCore(KNNExtractor):
         
         print('patch shape:',patch.shape)
         if self.match_mode == "global":
-            self.patch_lib = torch.cat(self.patch_lib, 0) # [1024*len_ds, 384]
+            self.patch_lib = torch.cat(self.patch_lib, 0) # [H*W*len_ds, 384]
         elif self.match_mode == "same_row":
-            self.patch_lib = torch.cat(self.patch_lib, 1) # [32, 32*len_ds, 384]
+            self.patch_lib = torch.cat(self.patch_lib, 1) # [H, W*len_ds, 384]
         elif self.match_mode == "exact_position":
-            self.patch_lib = torch.cat(self.patch_lib, 2) # [32, 32, len_ds, 384]
+            self.patch_lib = torch.cat(self.patch_lib, 2) # [H, W, len_ds, 384]
 
         print('patch_lib shape:',self.patch_lib.shape)
 
@@ -624,10 +624,28 @@ class PatchCore(KNNExtractor):
             H, W, N_pos, C = self.patch_lib.shape
             r = neighbor_radius
             
-            
-            dist = torch.cdist(patch, self.patch_lib) # [H, W, 1, N_pos]
-            min_val, min_idx = torch.min(dist, dim=-1) # [H, W, 1]
-            min_val = min_val.reshape(-1)       # [H*W]
+            if r == 0:            
+                dist = torch.cdist(patch, self.patch_lib) # [H, W, 1, N_pos]
+                min_val, min_idx = torch.min(dist, dim=-1) # [H, W, 1]
+                min_val = min_val.reshape(-1)       # [H*W]
+            else:
+                lib_pad = torch.nn.functional.pad(
+                    self.patch_lib.permute(2, 3, 0, 1),  # [N_pos, C, H, W]
+                    (r, r, r, r), mode='replicate'
+                ).permute(2, 3, 0, 1)                       # [H+2r, W+2r, N_pos, C]
+                # 每位置 (h,w) 取邻域 [(h-r,h+r),(w-r,w+r)]，合并成 (2r+1)*(2r+1)*N_pos 个候选
+                # 用 unfold: lib_pad[h:h+2r+1,w:w+2r+1] 是该位置的候选
+                # 一次性构造 [H, W, (2r+1)*(2r+1)*N_pos, C]
+                K = 2*r+1
+                lib_pad = lib_pad.unfold(0, K, 1).unfold(1, K, 1) # [H+2r,W+2r,N_pos,C] -> [H,W,N_pos,C,K,K]
+                lib_pad = lib_pad.permute(0, 1, 4, 5, 2, 3).contiguous() # [H,W,K,K,N_pos,C]
+                lib_pad = lib_pad.reshape(H, W, K*K*N_pos, C)     # [H,W,K*K*N_pos,C]
+
+                # patch: [H,W,1,C], self.patch_lib: [H,W,K*K*N_pos,C]
+                print('patch shape:', patch.shape, 'patch_lib shape:', lib_pad.shape)
+                dist = torch.cdist(patch, lib_pad) # [H,W,K*K*N_pos]
+                min_val, min_idx = torch.min(dist, dim=-1) # [H,W]
+                min_val = min_val.reshape(-1)       # [H*W]
 
         s_idx = torch.argmax(min_val)
         s_star = torch.max(min_val)
