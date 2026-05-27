@@ -403,7 +403,7 @@ class PatchCore(KNNExtractor):
         start_pos: int = 0, 
         end_pos: int = 0,
 		jobini = None,
-        match_mode: str = "exact_position" #global | same_row | exact_position
+        match_mode: str = "exact_position" # 推理匹配方式: global | same_row | exact_position，训练库统一按 exact_position 保存
     ):
         super().__init__(
             backbone_name=backbone_name,
@@ -452,107 +452,52 @@ class PatchCore(KNNExtractor):
             if self.start_pos != 0 or self.end_pos !=0:
                 patch = patch[:, :, :, int(self.start_pos / 8) : int(self.end_pos / 8)]
             
-            if self.match_mode == "global":
-                patch = patch.reshape(patch.shape[1], -1).T #[H*W, 384]
-                self.patch_lib.append(patch)
-            elif self.match_mode == "same_row":
-                patch = patch.permute(0,2,3,1)
-                patch = patch.reshape(patch.shape[1], -1, patch.shape[-1]) # [H, W, 384]
-                self.patch_lib.append(patch)
-            elif self.match_mode == "exact_position":
-                patch = patch.permute(0,2,3,1)
-                patch = patch.reshape(patch.shape[1],patch.shape[2], -1, patch.shape[-1]) # [H, W, 1, 384]
-                self.patch_lib.append(patch)
+            patch = patch.permute(0,2,3,1)
+            patch = patch.reshape(patch.shape[1],patch.shape[2], -1, patch.shape[-1]) # [H, W, 1, 384]
+            self.patch_lib.append(patch)
 
             if self.jobini is not None:
                 self.jobini.set_exec_progress(10 + (idx / len_ds) * 20)  # ?
         
         print('patch shape:',patch.shape)
-        if self.match_mode == "global":
-            self.patch_lib = torch.cat(self.patch_lib, 0) # [H*W*len_ds, 384]
-        elif self.match_mode == "same_row":
-            self.patch_lib = torch.cat(self.patch_lib, 1) # [H, W*len_ds, 384]
-        elif self.match_mode == "exact_position":
-            self.patch_lib = torch.cat(self.patch_lib, 2) # [H, W, len_ds, 384]
+        self.patch_lib = torch.cat(self.patch_lib, 2) # [H, W, len_ds, 384]
 
         print('patch_lib shape:',self.patch_lib.shape)
 
         # progress: 30 -> 95
         if self.f_coreset < 1:
-            if self.match_mode == "global":
-                if self.max_feature_count == 0:
-                    n = min(int(self.f_coreset * self.patch_lib.shape[0]), 60000)
-                else:
-                    n = min(int(self.f_coreset * self.patch_lib.shape[0]), self.max_feature_count)
-                    
-                self.coreset_idx = get_coreset_idx_randomp(
-                    self.patch_lib,
-                    n,
-                    eps=self.coreset_eps,
-                    jobini=self.jobini
-                )
-                self.patch_lib = self.patch_lib[self.coreset_idx]
-            elif self.match_mode == "same_row":
-                H = self.patch_lib.shape[0]
-                if self.max_feature_count == 0:
-                    n = min(int(self.f_coreset * self.patch_lib.shape[1]), 60000//H)
-                else:
-                    n = min(int(self.f_coreset * self.patch_lib.shape[1]), self.max_feature_count//H)
-                n = max(n, 1) # at least 1 patch per position, otherwise SparseRandomProjection will complain.
-                # 输入大小:[W, N, C] 对每一行进行采样子集
-                sampled_rows = []
-                for h in range(H):
-                    row_lib = self.patch_lib[h]  # [W*N_train, C]
-                    # 行内 patch 数 <= n 时跳过 coreset，避免 SparseRandomProjection 出错
-                    if row_lib.shape[0] <= n:
-                        sampled_rows.append(row_lib)
+            H = self.patch_lib.shape[0]
+            W = self.patch_lib.shape[1]
+            if self.max_feature_count == 0:
+                n = min(int(self.f_coreset * self.patch_lib.shape[2]), 60000//(H*W))
+            else:
+                n = min(int(self.f_coreset * self.patch_lib.shape[2]), self.max_feature_count//(H*W))
+            n = max(n, 1) # at least 1 patch per position, otherwise SparseRandomProjection will complain.
+            # 输入大小:[H, W, N, C] 对每个位置进行采样子集
+            sampled_positions = []
+            for h in range(H):
+                for w in range(W):
+                    pos_lib = self.patch_lib[h, w]  # [N_train, C]
+                    # 位置内 patch 数 <= n 时跳过 coreset，避免 SparseRandomProjection 出错
+                    if pos_lib.shape[0] <= n:
+                        sampled_positions.append(pos_lib)
                     else:
                         idx = get_coreset_idx_randomp(
-                            row_lib,
+                            pos_lib,
                             n,
                             eps=self.coreset_eps,
                             jobini=None,    # 子任务进度不上报，避免反复刷 ini
                         )
-                        sampled_rows.append(row_lib[idx])
-                    
-                    # 上报每行的总进度 30 -> 95
+                        sampled_positions.append(pos_lib[idx])
+
+                    # 上报每个位置的总进度 30 -> 95
                     if self.jobini is not None:
-                        self.jobini.set_exec_progress(30 + ((h+1) / H) * 65)
-                
-                self.patch_lib = torch.stack(sampled_rows, dim=0)  # [H, n, C]
-            elif self.match_mode == "exact_position":
-                H = self.patch_lib.shape[0]
-                W = self.patch_lib.shape[1]
-                if self.max_feature_count == 0:
-                    n = min(int(self.f_coreset * self.patch_lib.shape[2]), 60000//(H*W))
-                else:
-                    n = min(int(self.f_coreset * self.patch_lib.shape[2]), self.max_feature_count//(H*W))
-                n = max(n, 1) # at least 1 patch per position, otherwise SparseRandomProjection will complain.
-                # 输入大小:[H, W, N, C] 对每个位置进行采样子集
-                sampled_positions = []
-                for h in range(H):
-                    for w in range(W):
-                        pos_lib = self.patch_lib[h, w]  # [N_train, C]
-                        # 位置内 patch 数 <= n 时跳过 coreset，避免 SparseRandomProjection 出错
-                        if pos_lib.shape[0] <= n:
-                            sampled_positions.append(pos_lib)
-                        else:
-                            idx = get_coreset_idx_randomp(
-                                pos_lib,
-                                n,
-                                eps=self.coreset_eps,
-                                jobini=None,    # 子任务进度不上报，避免反复刷 ini
-                            )
-                            sampled_positions.append(pos_lib[idx])
-                        
-                        # 上报每个位置的总进度 30 -> 95
-                        if self.jobini is not None:
-                            total_positions = H * W
-                            current_position = h * W + w + 1
-                            self.jobini.set_exec_progress(30 + (current_position / total_positions) * 65)
-                self.patch_lib = torch.stack(sampled_positions, dim=0).reshape(H, W, -1, self.patch_lib.shape[-1])
+                        total_positions = H * W
+                        current_position = h * W + w + 1
+                        self.jobini.set_exec_progress(30 + (current_position / total_positions) * 65)
+            self.patch_lib = torch.stack(sampled_positions, dim=0).reshape(H, W, -1, self.patch_lib.shape[-1])
             print('coreset size:',self.patch_lib.shape)
-            save_tensor(self.results_dir,'patch_lib.ts',self.patch_lib)
+        save_tensor(self.results_dir,'patch_lib.ts',self.patch_lib)
         
     def load(self, path: str,fmap_size: list):
         # Training saves the patch library as a TorchScript archive via
@@ -582,55 +527,57 @@ class PatchCore(KNNExtractor):
         fmap_h, fmap_w = patch.shape[-2], patch.shape[-1]  # 记录特征图空间尺寸（裁剪后）
         
         patch = patch.to(device)
-        self.patch_lib = self.patch_lib.to(device)
-        
+        patch_lib = self.patch_lib.to(device)
+
         if self.match_mode == "global":
             # patch = patch.reshape(patch.shape[1], -1).T
             patch = patch.permute(0, 2, 3, 1).reshape(-1, patch.shape[1]) # [H*W, C]
-            dist = torch.cdist(patch, self.patch_lib)   # [H*W, N]
-            min_val, min_idx = torch.min(dist, dim=1)        
-            
+            global_lib = patch_lib.reshape(-1, patch_lib.shape[-1]) # [H*W*N, C]
+            dist = torch.cdist(patch, global_lib)   # [H*W, H*W*N]
+            min_val, min_idx = torch.min(dist, dim=1)
+
         elif self.match_mode == "same_row":
             patch = patch.permute(0, 2, 3, 1).squeeze(0)   # [H, W, C]
-            # patch: [H, W, C], self.patch_lib: [H, N_row, C]
-            H, N_row, C = self.patch_lib.shape
+            # patch: [H, W, C], row_lib: [H, W*N_pos, C]
+            H, W, N_pos, C = patch_lib.shape
+            row_lib = patch_lib.reshape(H, W * N_pos, C)
             r = neighbor_radius
             if r == 0:
-                dist = torch.cdist(patch, self.patch_lib) # [H, W, N_row]
+                dist = torch.cdist(patch, row_lib) # [H, W, W*N_pos]
                 min_val, min_idx = torch.min(dist, dim=2) # [H, W]
                 min_val = min_val.reshape(-1)       # [H*W]
             else:
                 lib_pad = torch.nn.functional.pad(
-                    self.patch_lib.permute(1, 2, 0),  # [N_row, C, H]
+                    row_lib.permute(1, 2, 0),  # [W*N_pos, C, H]
                     (r, r), mode='replicate'
-                ).permute(2, 0, 1)                       # [H+2r, N_row, C]
-                # 每行 h 取邻域 [h-r, h+r]，合并成 (2r+1)*N_row 个候选
+                ).permute(2, 0, 1)                       # [H+2r, W*N_pos, C]
+                # 每行 h 取邻域 [h-r, h+r]，合并成 (2r+1)*W*N_pos 个候选
                 # 用 unfold: lib_pad[h:h+2r+1] 是该行的候选
-                # 一次性构造 [H, (2r+1)*N_row, C]
+                # 一次性构造 [H, (2r+1)*W*N_pos, C]
                 K = 2*r+1
-                lib_pad = lib_pad.unfold(0, K, 1) # [H+2r, N_row, C] -> [H, N_row, C, K]
-                lib_pad = lib_pad.permute(0, 3, 1, 2).contiguous() # [H, K, N_row, C]
-                lib_pad = lib_pad.reshape(H, K * N_row, C)     # [H, K*N_row, C]
+                lib_pad = lib_pad.unfold(0, K, 1) # [H+2r, W*N_pos, C] -> [H, W*N_pos, C, K]
+                lib_pad = lib_pad.permute(0, 3, 1, 2).contiguous() # [H, K, W*N_pos, C]
+                lib_pad = lib_pad.reshape(H, K * W * N_pos, C)     # [H, K*W*N_pos, C]
 
-                # patch: [H, W, C], self.patch_lib: [H, K*N_row, C]
+                # patch: [H, W, C], lib_pad: [H, K*W*N_pos, C]
                 print('patch shape:', patch.shape, 'patch_lib shape:', lib_pad.shape)
-                dist = torch.cdist(patch, lib_pad) # [H, W, K*N_row]
+                dist = torch.cdist(patch, lib_pad) # [H, W, K*W*N_pos]
                 min_val, min_idx = torch.min(dist, dim=2) # [H, W]
                 min_val = min_val.reshape(-1)       # [H*W]
 
         elif self.match_mode == "exact_position":
             patch = patch.permute(0, 2, 3, 1).squeeze(0).unsqueeze(2)   # [H, W, 1, C]
-            # patch: [H, W, 1, C], self.patch_lib: [H, W, N_pos, C]
-            H, W, N_pos, C = self.patch_lib.shape
+            # patch: [H, W, 1, C], patch_lib: [H, W, N_pos, C]
+            H, W, N_pos, C = patch_lib.shape
             r = neighbor_radius
-            
-            if r == 0:            
-                dist = torch.cdist(patch, self.patch_lib) # [H, W, 1, N_pos]
+
+            if r == 0:
+                dist = torch.cdist(patch, patch_lib) # [H, W, 1, N_pos]
                 min_val, min_idx = torch.min(dist, dim=-1) # [H, W, 1]
                 min_val = min_val.reshape(-1)       # [H*W]
             else:
                 lib_pad = torch.nn.functional.pad(
-                    self.patch_lib.permute(2, 3, 0, 1),  # [N_pos, C, H, W]
+                    patch_lib.permute(2, 3, 0, 1),  # [N_pos, C, H, W]
                     (r, r, r, r), mode='replicate'
                 ).permute(2, 3, 0, 1)                       # [H+2r, W+2r, N_pos, C]
                 # 每位置 (h,w) 取邻域 [(h-r,h+r),(w-r,w+r)]，合并成 (2r+1)*(2r+1)*N_pos 个候选
@@ -641,7 +588,7 @@ class PatchCore(KNNExtractor):
                 lib_pad = lib_pad.permute(0, 1, 4, 5, 2, 3).contiguous() # [H,W,K,K,N_pos,C]
                 lib_pad = lib_pad.reshape(H, W, K*K*N_pos, C)     # [H,W,K*K*N_pos,C]
 
-                # patch: [H,W,1,C], self.patch_lib: [H,W,K*K*N_pos,C]
+                # patch: [H,W,1,C], lib_pad: [H,W,K*K*N_pos,C]
                 print('patch shape:', patch.shape, 'patch_lib shape:', lib_pad.shape)
                 dist = torch.cdist(patch, lib_pad) # [H,W,K*K*N_pos]
                 min_val, min_idx = torch.min(dist, dim=-1) # [H,W]
@@ -681,4 +628,7 @@ class PatchCore(KNNExtractor):
         return super().get_parameters({
             "f_coreset": self.f_coreset,
             "n_reweight": self.n_reweight,
+            "start_pos": self.start_pos,
+            "end_pos": self.end_pos,
+            "match_mode": self.match_mode,
         })
