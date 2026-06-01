@@ -56,3 +56,38 @@ def test_new_archive_preserves_position_stat_shapes(tmp_path):
     assert loaded_stats["baseline"].shape == torch.Size([4, 5])
     assert loaded_stats["scale"].shape == torch.Size([4, 5])
     assert loaded_stats["recommended_pixel_threshold"].shape == torch.Size([])
+
+
+def test_patchcore_load_old_archive_leaves_score_stats_none(tmp_path):
+    from models import PatchCore
+
+    patch_lib = torch.randn(2, 2, 4, 3)
+    save_tensor(str(tmp_path), "old.ts", patch_lib)
+
+    model = PatchCore.__new__(PatchCore)
+    model.score_stats = "not cleared"
+    result = PatchCore.load(model, str(tmp_path / "old.ts"), [2, 2])
+
+    assert result is True
+    assert torch.allclose(model.patch_lib, patch_lib)
+    assert model.score_stats is None
+
+
+def test_patchcore_load_new_archive_sets_score_stats(tmp_path):
+    from models import PatchCore
+
+    patch_lib = torch.randn(2, 2, 4, 3)
+    stats = {
+        "baseline": torch.ones(2, 2),
+        "scale": torch.full((2, 2), 2.0),
+        "recommended_pixel_threshold": torch.tensor(4.0),
+    }
+    save_patchcore_archive(str(tmp_path), "new.ts", patch_lib, stats)
+
+    model = PatchCore.__new__(PatchCore)
+    result = PatchCore.load(model, str(tmp_path / "new.ts"), [2, 2])
+
+    assert result is True
+    assert torch.allclose(model.patch_lib, patch_lib)
+    assert torch.allclose(model.score_stats["baseline"], stats["baseline"])
+    assert torch.allclose(model.score_stats["scale"], stats["scale"])

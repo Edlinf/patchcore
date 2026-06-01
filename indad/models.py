@@ -582,17 +582,35 @@ class PatchCore(KNNExtractor):
         save_patchcore_archive(self.results_dir, 'patch_lib.ts', self.patch_lib, self.score_stats)
         
     def load(self, path: str,fmap_size: list):
-        # Training saves the patch library as a TorchScript archive via
-        # `torch.jit.script(...).save(...)`, so we should load it with
-        # `torch.jit.load(...)` instead of `torch.load(...)`.
-        ts = torch.jit.load(path, map_location="cpu")
-        par = ts.named_parameters()
-        for key, value in par:
-            self.patch_lib = value.detach()
-            self.patch_lib.requires_grad_(False)
-            break
-        self.resize = torch.nn.AdaptiveAvgPool2d(fmap_size)
+        self.patch_lib, self.score_stats = load_patchcore_archive(path)
+        object.__setattr__(self, "resize", torch.nn.AdaptiveAvgPool2d(fmap_size))
+        if self.score_stats is None:
+            print("score normalization stats not found; using raw PatchCore scores")
         return True
+
+    def _normalize_score_map_if_available(self, raw_map: torch.Tensor) -> torch.Tensor:
+        if not getattr(self, "score_normalization_enabled", True):
+            return raw_map
+        if self.match_mode != "exact_position":
+            return raw_map
+        if self.score_stats is None:
+            return raw_map
+
+        baseline = self.score_stats["baseline"].to(raw_map.device)
+        scale = self.score_stats["scale"].to(raw_map.device)
+        if baseline.shape != raw_map.shape or scale.shape != raw_map.shape:
+            print(
+                "score normalization stats shape mismatch; using raw PatchCore scores "
+                f"raw={tuple(raw_map.shape)} baseline={tuple(baseline.shape)} scale={tuple(scale.shape)}"
+            )
+            return raw_map
+
+        return apply_position_normalization(
+            raw_map,
+            baseline,
+            scale,
+            clamp_min_zero=getattr(self, "score_normalization_clamp_min_zero", True),
+        )
 
     def predict(self, sample, path: str, neighbor_radius: int = 1):
         start_time = timeit.default_timer()
@@ -676,8 +694,10 @@ class PatchCore(KNNExtractor):
                 min_val, min_idx = torch.min(dist, dim=-1) # [H,W]
                 min_val = min_val.reshape(-1)       # [H*W]
 
-        s_idx = torch.argmax(min_val)
-        s_star = torch.max(min_val)
+        raw_map = min_val.view(fmap_h, fmap_w)
+        score_map = self._normalize_score_map_if_available(raw_map)
+
+        s_star = torch.max(score_map)
         s = s_star.cpu()
 
         if isinstance(self.smap_size, int):
@@ -692,7 +712,7 @@ class PatchCore(KNNExtractor):
             sample = sample[:, :, :, int(self.start_pos) : int(self.end_pos)]
 
         # # segmentation map
-        s_map = min_val.view(1,1, fmap_h, fmap_w)
+        s_map = score_map.view(1, 1, fmap_h, fmap_w)
         s_map = torch.nn.functional.interpolate(
             s_map, size=(height, width), mode='bilinear'
         )
