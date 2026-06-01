@@ -91,3 +91,39 @@ def test_patchcore_load_new_archive_sets_score_stats(tmp_path):
     assert torch.allclose(model.patch_lib, patch_lib)
     assert torch.allclose(model.score_stats["baseline"], stats["baseline"])
     assert torch.allclose(model.score_stats["scale"], stats["scale"])
+
+
+def test_patchcore_normalize_score_map_uses_stats_for_exact_position():
+    from models import PatchCore
+
+    model = PatchCore.__new__(PatchCore)
+    model.score_normalization_enabled = True
+    model.score_normalization_clamp_min_zero = True
+    model.match_mode = "exact_position"
+    model.score_stats = {
+        "baseline": torch.tensor([[1.0, 2.0]]),
+        "scale": torch.tensor([[1.0, 2.0]]),
+    }
+    raw_map = torch.tensor([[0.0, 6.0]])
+
+    norm_map = PatchCore._normalize_score_map_if_available(model, raw_map)
+
+    assert torch.allclose(norm_map, torch.tensor([[0.0, 2.0]]))
+
+
+def test_patchcore_normalize_score_map_returns_raw_for_same_row():
+    from models import PatchCore
+
+    model = PatchCore.__new__(PatchCore)
+    model.score_normalization_enabled = True
+    model.score_normalization_clamp_min_zero = True
+    model.match_mode = "same_row"
+    model.score_stats = {
+        "baseline": torch.tensor([[1.0, 2.0]]),
+        "scale": torch.tensor([[1.0, 2.0]]),
+    }
+    raw_map = torch.tensor([[0.0, 6.0]])
+
+    result = PatchCore._normalize_score_map_if_available(model, raw_map)
+
+    assert result is raw_map
