@@ -480,10 +480,18 @@ class PatchCore(KNNExtractor):
         results_dir : str = './results',
         image_size: int = 224,
         max_feature_count: int = 0,
-        start_pos: int = 0, 
+        start_pos: int = 0,
         end_pos: int = 0,
-		jobini = None,
-        match_mode: str = "exact_position" # 推理匹配方式: global | same_row | exact_position，训练库统一按 exact_position 保存
+			jobini = None,
+        match_mode: str = "exact_position", # 推理匹配方式: global | same_row | exact_position，训练库统一按 exact_position 保存
+        score_normalization_enabled: bool = True,
+        score_normalization_min_train_patches: int = 4,
+        score_normalization_scale_floor_quantile: float = 0.2,
+        score_normalization_scale_cap_quantile = None,
+        score_normalization_smooth_scale: bool = True,
+        score_normalization_smooth_kernel: int = 3,
+        score_normalization_threshold_quantile: float = 0.999,
+        score_normalization_clamp_min_zero: bool = True,
     ):
         super().__init__(
             backbone_name=backbone_name,
