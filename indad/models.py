@@ -552,6 +552,7 @@ class PatchCore(KNNExtractor):
         self.patch_lib = torch.cat(self.patch_lib, 2) # [H, W, len_ds, 384]
 
         print('patch_lib shape:',self.patch_lib.shape)
+        score_stats_patch_lib = self.patch_lib
 
         # progress: 30 -> 95
         if self.f_coreset < 1:
@@ -591,7 +592,7 @@ class PatchCore(KNNExtractor):
         if self.score_normalization_enabled:
             try:
                 self.score_stats = compute_position_score_stats(
-                    self.patch_lib,
+                    score_stats_patch_lib,
                     min_train_patches=self.score_normalization_min_train_patches,
                     scale_floor_quantile=self.score_normalization_scale_floor_quantile,
                     scale_cap_quantile=self.score_normalization_scale_cap_quantile,
