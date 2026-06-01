@@ -13,6 +13,10 @@ import numpy as np
 from sklearn.metrics import roc_auc_score
 
 from utils import GaussianBlur, get_coreset_idx_randomp, get_tqdm_params
+from patchcore_normalization import (
+    apply_position_normalization,
+    compute_position_score_stats,
+)
 from PIL import Image
 import os
 from data import IMAGENET_MEAN, IMAGENET_STD
@@ -38,14 +42,62 @@ def pred_to_img(x):
 
 class Module(nn.Module):
     pass
-    
-def save_tensor(results_dir,filename,x):
-    path = os.path.join(results_dir,filename)
+
+
+def save_tensor(results_dir, filename, x):
+    path = os.path.join(results_dir, filename)
     m = Module()
     par = nn.Parameter(x)
-    m.register_parameter("0",par)
+    m.register_parameter("0", par)
     tensors = torch.jit.script(m)
     tensors.save(path)
+
+
+def save_patchcore_archive(results_dir, filename, patch_lib, stats=None):
+    path = os.path.join(results_dir, filename)
+    m = Module()
+    m.register_parameter("patch_lib", nn.Parameter(patch_lib.detach()))
+
+    if stats is not None:
+        m.register_parameter("score_baseline", nn.Parameter(stats["baseline"].detach()))
+        m.register_parameter("score_scale", nn.Parameter(stats["scale"].detach()))
+        threshold = stats["recommended_pixel_threshold"].detach().reshape(1)
+        m.register_parameter("recommended_pixel_threshold", nn.Parameter(threshold))
+
+    tensors = torch.jit.script(m)
+    tensors.save(path)
+
+
+def load_patchcore_archive(path):
+    ts = torch.jit.load(path, map_location="cpu")
+    params = {key: value.detach() for key, value in ts.named_parameters()}
+
+    if "patch_lib" in params:
+        patch_lib = params["patch_lib"]
+    elif "0" in params:
+        patch_lib = params["0"]
+    else:
+        raise ValueError(f"No patch library found in {path}")
+
+    if "score_baseline" in params and "score_scale" in params:
+        stats = {
+            "baseline": params["score_baseline"],
+            "scale": params["score_scale"],
+            "recommended_pixel_threshold": params.get(
+                "recommended_pixel_threshold",
+                torch.tensor([0.0]),
+            ).reshape(()),
+        }
+    else:
+        stats = None
+
+    patch_lib.requires_grad_(False)
+    if stats is not None:
+        stats["baseline"].requires_grad_(False)
+        stats["scale"].requires_grad_(False)
+        stats["recommended_pixel_threshold"].requires_grad_(False)
+
+    return patch_lib, stats
 
 def print_tensor(x,num):
     t = x.reshape(-1)
