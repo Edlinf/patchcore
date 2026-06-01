@@ -473,6 +473,15 @@ class PatchCore(KNNExtractor):
         self.blur = GaussianBlur(4)
         self.n_reweight = 3
         self.match_mode = match_mode
+        self.score_normalization_enabled = score_normalization_enabled
+        self.score_normalization_min_train_patches = score_normalization_min_train_patches
+        self.score_normalization_scale_floor_quantile = score_normalization_scale_floor_quantile
+        self.score_normalization_scale_cap_quantile = score_normalization_scale_cap_quantile
+        self.score_normalization_smooth_scale = score_normalization_smooth_scale
+        self.score_normalization_smooth_kernel = score_normalization_smooth_kernel
+        self.score_normalization_threshold_quantile = score_normalization_threshold_quantile
+        self.score_normalization_clamp_min_zero = score_normalization_clamp_min_zero
+        self.score_stats = None
 
         self.patch_lib = []
         self.largest_fmap_size = None
@@ -549,7 +558,28 @@ class PatchCore(KNNExtractor):
                         self.jobini.set_exec_progress(30 + (current_position / total_positions) * 65)
             self.patch_lib = torch.stack(sampled_positions, dim=0).reshape(H, W, -1, self.patch_lib.shape[-1])
             print('coreset size:',self.patch_lib.shape)
-        save_tensor(self.results_dir,'patch_lib.ts',self.patch_lib)
+
+        self.score_stats = None
+        if self.score_normalization_enabled:
+            try:
+                self.score_stats = compute_position_score_stats(
+                    self.patch_lib,
+                    min_train_patches=self.score_normalization_min_train_patches,
+                    scale_floor_quantile=self.score_normalization_scale_floor_quantile,
+                    scale_cap_quantile=self.score_normalization_scale_cap_quantile,
+                    smooth_scale=self.score_normalization_smooth_scale,
+                    smooth_kernel=self.score_normalization_smooth_kernel,
+                    threshold_quantile=self.score_normalization_threshold_quantile,
+                )
+                print(
+                    "score normalization threshold:",
+                    self.score_stats["recommended_pixel_threshold"].item(),
+                )
+            except ValueError as exc:
+                print(f"score normalization disabled: {exc}")
+                self.score_stats = None
+
+        save_patchcore_archive(self.results_dir, 'patch_lib.ts', self.patch_lib, self.score_stats)
         
     def load(self, path: str,fmap_size: list):
         # Training saves the patch library as a TorchScript archive via
@@ -683,4 +713,13 @@ class PatchCore(KNNExtractor):
             "start_pos": self.start_pos,
             "end_pos": self.end_pos,
             "match_mode": self.match_mode,
+            "score_normalization_enabled": self.score_normalization_enabled,
+            "score_normalization_min_train_patches": self.score_normalization_min_train_patches,
+            "score_normalization_scale_floor_quantile": self.score_normalization_scale_floor_quantile,
+            "score_normalization_scale_cap_quantile": self.score_normalization_scale_cap_quantile,
+            "score_normalization_smooth_scale": self.score_normalization_smooth_scale,
+            "score_normalization_smooth_kernel": self.score_normalization_smooth_kernel,
+            "score_normalization_threshold_quantile": self.score_normalization_threshold_quantile,
+            "score_normalization_clamp_min_zero": self.score_normalization_clamp_min_zero,
+            "score_normalization_has_stats": self.score_stats is not None,
         })

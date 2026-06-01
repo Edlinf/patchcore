@@ -39,3 +39,20 @@ def test_load_patchcore_archive_reads_new_archive_with_embedded_stats(tmp_path):
         loaded_stats["recommended_pixel_threshold"],
         stats["recommended_pixel_threshold"],
     )
+
+
+def test_new_archive_preserves_position_stat_shapes(tmp_path):
+    patch_lib = torch.randn(4, 5, 6, 7)
+    stats = {
+        "baseline": torch.randn(4, 5),
+        "scale": torch.ones(4, 5),
+        "recommended_pixel_threshold": torch.tensor(2.25),
+    }
+
+    save_patchcore_archive(str(tmp_path), "patch_lib.ts", patch_lib, stats)
+    loaded_patch_lib, loaded_stats = load_patchcore_archive(str(tmp_path / "patch_lib.ts"))
+
+    assert loaded_patch_lib.shape == torch.Size([4, 5, 6, 7])
+    assert loaded_stats["baseline"].shape == torch.Size([4, 5])
+    assert loaded_stats["scale"].shape == torch.Size([4, 5])
+    assert loaded_stats["recommended_pixel_threshold"].shape == torch.Size([])
