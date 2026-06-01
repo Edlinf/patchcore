@@ -5,6 +5,15 @@ feature_indices: [2,3]
 image_size: !var image_size
 f_coreset: 0.10
 coreset_eps: 0.90
+score_normalization:
+    enabled: true
+    min_train_patches: 4
+    scale_floor_quantile: 0.20
+    scale_cap_quantile: null
+    smooth_scale: true
+    smooth_kernel: 3
+    threshold_quantile: 0.999
+    clamp_min_zero: true
 output: 
     model_dir: !join ['/opt/data/private/dataset/model/','20',!slice [*job_no,0,4],'/',!slice [*job_no,4,6]]
     model_name: !join ['patchcore_',*job_no,'_{fmap_size}_{image_shape}_{sha}.pth']

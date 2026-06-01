@@ -39,8 +39,9 @@ DEFAULT_FEATURE_INDICES = {
     "patchcore":"2,3",
 }
 
-def run_model(jobini, method: str, backbone: str, resize_method:str,out_indices: tuple, cls: str, dataset_dir: str,results_dir: str,image_size: int, f_coreset: float,coreset_eps: float, max_feature_count: int=0, start_pos: int=0, end_pos: int=0):
+def run_model(jobini, method: str, backbone: str, resize_method:str,out_indices: tuple, cls: str, dataset_dir: str,results_dir: str,image_size: int, f_coreset: float,coreset_eps: float, max_feature_count: int=0, start_pos: int=0, end_pos: int=0, score_normalization=None):
     results = {}
+    score_normalization = score_normalization or {}
     if method == "spade":
         backbone_name = backbone if len(backbone) > 0 else "wide_resnet50_2" 
         model = SPADE(
@@ -73,9 +74,17 @@ def run_model(jobini, method: str, backbone: str, resize_method:str,out_indices:
             results_dir=results_dir,
             image_size=image_size,  # Examples: 320 or [640, 320]
             max_feature_count=max_feature_count,
-            start_pos=start_pos, 
-            end_pos=end_pos,		
-            jobini=jobini
+            start_pos=start_pos,
+            end_pos=end_pos,
+            jobini=jobini,
+            score_normalization_enabled=score_normalization.get('enabled', True),
+            score_normalization_min_train_patches=score_normalization.get('min_train_patches', 4),
+            score_normalization_scale_floor_quantile=score_normalization.get('scale_floor_quantile', 0.2),
+            score_normalization_scale_cap_quantile=score_normalization.get('scale_cap_quantile', None),
+            score_normalization_smooth_scale=score_normalization.get('smooth_scale', True),
+            score_normalization_smooth_kernel=score_normalization.get('smooth_kernel', 3),
+            score_normalization_threshold_quantile=score_normalization.get('threshold_quantile', 0.999),
+            score_normalization_clamp_min_zero=score_normalization.get('clamp_min_zero', True),
         )
     # model = model.to(device)
     print(f"\n█│ Running {method} on {cls} dataset.")
@@ -202,6 +211,7 @@ def cli_interface(cfg_tpl: str, cfg_path: str, output_dir: str, max_feature_coun
     image_size = cfg['image_size']
     f_coreset = cfg['f_coreset']        #fraction the number of training samples
     coreset_eps = 0.90                  #sparse projection parameter
+    score_normalization = cfg.get('score_normalization', {})
     feature_indices = "2,3"
     dataset_dir = cfg['dataset_dir']
     dataset = cfg['dataset']
@@ -253,7 +263,7 @@ def cli_interface(cfg_tpl: str, cfg_path: str, output_dir: str, max_feature_coun
         os.makedirs(result_dir)
 
     #运行模型
-    total_results, run_info = run_model(jobini,method, backbone, resize_method, out_indices, dataset, dataset_dir,result_dir,image_size, f_coreset,coreset_eps, max_feature_count, start_pos, end_pos)
+    total_results, run_info = run_model(jobini,method, backbone, resize_method, out_indices, dataset, dataset_dir,result_dir,image_size, f_coreset,coreset_eps, max_feature_count, start_pos, end_pos, score_normalization)
     
     #输出结果
     print_and_export_results(total_results, method, result_dir)
