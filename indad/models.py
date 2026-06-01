@@ -182,6 +182,34 @@ def save_smap_image2(results_dir,img_path,sample,score,s_map,predict_time):
 
     cv2.imwrite(smap_path, stackimg)
 
+
+def save_smap_image_pair(results_dir, img_path, sample, score, raw_s_map, final_s_map, predict_time):
+    filename = os.path.basename(img_path).split('.')[0]
+    classname = os.path.basename(os.path.dirname(img_path))
+    scorename = "{:.2f}".format(score.item())
+    predict_time_str = "{:.0f}".format(predict_time * 1000)
+    smap_path = os.path.join(
+        results_dir,
+        classname + '_' + filename + '_' + scorename + '_' + predict_time_str + 'ms_pair.jpg'
+    )
+
+    img = tensor_to_img(sample[0], normalize=True)
+    img = (img * 255).astype(np.uint8)
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+    raw_map = pred_to_img(raw_s_map).cpu().numpy().squeeze()
+    final_map = pred_to_img(final_s_map).cpu().numpy().squeeze()
+
+    raw_heatmap = cv2.applyColorMap((raw_map * 255).astype(np.uint8), cv2.COLORMAP_JET)
+    final_heatmap = cv2.applyColorMap((final_map * 255).astype(np.uint8), cv2.COLORMAP_JET)
+
+    raw_result = cv2.addWeighted(raw_heatmap, 0.5, img, 0.5, 0)
+    final_result = cv2.addWeighted(final_heatmap, 0.5, img, 0.5, 0)
+
+    stackimg = cv2.vconcat([img, raw_result, final_result])
+    cv2.imwrite(smap_path, stackimg)
+
+
 def save_smap_image(results_dir,img_path,score,s_map,predict_time):
     #获取图片所在文件目录，文件名称
     filename=os.path.basename(img_path)
@@ -719,10 +747,27 @@ class PatchCore(KNNExtractor):
         s_map = s_map.cpu()
         s_map = self.blur(s_map)
 
+        raw_s_map = raw_map.view(1, 1, fmap_h, fmap_w)
+        raw_s_map = torch.nn.functional.interpolate(
+            raw_s_map, size=(height, width), mode='bilinear'
+        )
+        raw_s_map = raw_s_map.cpu()
+        raw_s_map = self.blur(raw_s_map)
+
         # save smap image
         end_time = timeit.default_timer()
         # save_smap_image(self.results_dir, path, s, s_map, end_time - start_time)
         save_smap_image2(self.results_dir, path, sample, s, s_map, end_time - start_time)
+        if self.score_stats is not None and self.match_mode == "exact_position":
+            save_smap_image_pair(
+                self.results_dir,
+                path,
+                sample,
+                s,
+                raw_s_map,
+                s_map,
+                end_time - start_time,
+            )
         return s, s_map
 
 
