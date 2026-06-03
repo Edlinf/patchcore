@@ -1,5 +1,17 @@
 # 更新日志
 
+## v4.0
+
+- 新增 PatchCore 按位置分数归一化能力，用于缓解背景区域与纹理/形变区域 raw distance 分布不一致导致的统一阈值失效问题。
+- 训练阶段基于 OK 图 patch 特征计算 leave-one-out 最近邻距离，并使用 median/MAD 估计每个位置的 `baseline` 和 `scale`。
+- 推理阶段在 `exact_position` 模式下可将原始 PatchCore 距离图转换为位置归一化 z-score 图，旧模型或非 `exact_position` 模式自动回退 raw score。
+- 新增 PatchCore 模型归档字段 `score_baseline`、`score_scale`、`recommended_pixel_threshold`，并保持旧版单参数归档兼容。
+- `run-yml.py` 入口接入 `score_normalization` 配置，`config/tpl/patchcore-cv2.yml` 增加默认归一化参数。
+- 新增 raw / normalized 热力图对比输出，便于观察归一化前后纹理区域和背景区域的分数变化。
+- 新增 `indad/patchcore_normalization.py` 单元测试和模型归档兼容性测试。
+- 修复 `test.sh`，使用 `run-yml.py` 作为 PatchCore yml 训练入口，并修正 bash 路径和参数换行问题。
+- 添加 `POSITION_NORMALIZATION_CHANGES.md`，记录位置归一化设计、配置、测试验证和使用注意事项。
+
 ## v3.0
 
 - PatchCore 训练阶段统一按 `exact_position` 方式保存特征库，`patch_lib` 格式固定为 `[H, W, N, C]`。

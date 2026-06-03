@@ -8,7 +8,7 @@ coreset_eps: 0.90
 score_normalization:
     enabled: true
     min_train_patches: 4
-    scale_floor_quantile: 0.20
+    scale_floor_quantile: 0.10
     scale_cap_quantile: null
     smooth_scale: true
     smooth_kernel: 3
