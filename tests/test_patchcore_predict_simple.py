@@ -107,7 +107,7 @@ def test_parse_model_info_simple_reads_current_filename():
     assert info["backbone"] == "resnet18"
     assert info["out_indices"] == [2, 3]
     assert info["fmap_size"] == [16, 48]
-    assert info["image_size"] == [128, 384]
+    assert info["image_size"] == [384, 128]
 
 
 def test_raw_map_global_matches_any_position():

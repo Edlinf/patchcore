@@ -107,7 +107,8 @@ def parse_model_info_simple(model_path):
         "backbone": backbone.replace("-", "_"),
         "out_indices": [2, 3],
         "fmap_size": [int(i) for i in fmap_size.split("x")],
-        "image_size": [image_shape[1], image_shape[2]],
+        # image_shape is saved as [C, H, W], while Cv2AdaptiveResize expects [W, H].
+        "image_size": [image_shape[2], image_shape[1]],
     }
 
 
