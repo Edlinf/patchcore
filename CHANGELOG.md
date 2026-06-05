@@ -1,5 +1,18 @@
 # 更新日志
 
+## v5.0
+
+- 新增独立 PatchCore 推理脚本 `indad/patchcore_predict_simple.py`，包含单独的 `PatchCorePredictor` 类，不依赖训练侧 `models.PatchCore`。
+- 推理脚本支持单张图片和目录批量推理，输出 `scores.csv`、`metrics.json` 以及合并后的热力图/叠加图。
+- 批量推理支持根据父目录名自动推断标签，`good/OK/normal` 记为 0，`bad/NG/defect/abnormal` 记为 1，并计算 image-level ROC AUC。
+- 支持加载旧版单参数模型归档和新版包含 `score_baseline`、`score_scale`、`recommended_pixel_threshold` 的归档。
+- 使用本地 `hub/checkpoints` 下的 backbone 权重，通过 `torch.hub.set_dir(project_root / "hub")` 避免联网下载。
+- 推理脚本新增 `--match-mode`，支持 `global`、`same_row`、`exact_position` 三种匹配模式。
+- `same_row` 和 `exact_position` 支持 `--neighbor-radius > 0`，并使用 `pad + unfold` 滑动窗口方式向量化计算邻域候选，替代慢速 Python 循环。
+- 默认 `neighbor_radius=0`，默认 `match_mode=exact_position`；归一化 score stats 仅在 `exact_position` 模式下应用。
+- 新增 `tests/test_patchcore_predict_simple.py`，覆盖模型归档加载、文件名解析、标签推断、三种匹配模式和邻域半径行为。
+- 数据集拆图预处理已迁出本仓库，独立到 `D:/python_project/028-grid-dataset-preprocess`；本仓库训练流程继续使用预处理后的小图数据集。
+
 ## v4.0
 
 - 新增 PatchCore 按位置分数归一化能力，用于缓解背景区域与纹理/形变区域 raw distance 分布不一致导致的统一阈值失效问题。
