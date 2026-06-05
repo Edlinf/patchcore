@@ -73,7 +73,14 @@ def test_load_patchcore_archive_simple_supports_new_archive(tmp_path):
     assert torch.allclose(loaded_stats["scale"], stats["scale"])
 
 
-from patchcore_predict_simple import apply_score_stats, parse_model_info_simple
+from patchcore_predict_simple import (
+    apply_score_stats,
+    parse_model_info_simple,
+    raw_map_exact_position,
+    raw_map_global,
+    raw_map_same_row,
+    select_score_map,
+)
 
 
 def test_apply_score_stats_clamps_negative_values():
@@ -97,3 +104,53 @@ def test_parse_model_info_simple_reads_current_filename():
     assert info["out_indices"] == [2, 3]
     assert info["fmap_size"] == [16, 48]
     assert info["image_size"] == [128, 384]
+
+
+def test_raw_map_global_matches_any_position():
+    patch = torch.tensor([[[[0.0, 10.0]]]])
+    patch_lib = torch.tensor([[[[5.0]], [[10.0]]]])
+
+    raw = raw_map_global(patch, patch_lib)
+
+    assert torch.allclose(raw, torch.tensor([[5.0, 0.0]]))
+
+
+def test_raw_map_exact_position_radius_zero_matches_same_position():
+    patch = torch.tensor([[[[0.0, 10.0]]]])
+    patch_lib = torch.tensor([[[[5.0]], [[7.0]]]])
+
+    raw = raw_map_exact_position(patch, patch_lib, neighbor_radius=0)
+
+    assert torch.allclose(raw, torch.tensor([[5.0, 3.0]]))
+
+
+def test_raw_map_exact_position_radius_one_can_match_neighbor_position():
+    patch = torch.tensor([[[[0.0, 10.0]]]])
+    patch_lib = torch.tensor([[[[5.0]], [[10.0]]]])
+
+    raw = raw_map_exact_position(patch, patch_lib, neighbor_radius=1)
+
+    assert torch.allclose(raw, torch.tensor([[5.0, 0.0]]))
+
+
+def test_raw_map_same_row_radius_zero_matches_same_row():
+    patch = torch.tensor([[[[0.0, 10.0], [20.0, 30.0]]]])
+    patch_lib = torch.tensor([
+        [[[1.0]], [[11.0]]],
+        [[[100.0]], [[31.0]]],
+    ])
+
+    raw = raw_map_same_row(patch, patch_lib, neighbor_radius=0)
+
+    assert torch.allclose(raw, torch.tensor([[1.0, 1.0], [11.0, 1.0]]))
+
+
+def test_select_score_map_applies_stats_only_for_exact_position():
+    raw = torch.tensor([[3.0]])
+    stats = {"baseline": torch.tensor([[1.0]]), "scale": torch.tensor([[2.0]])}
+
+    exact = select_score_map(raw, stats, match_mode="exact_position")
+    global_map = select_score_map(raw, stats, match_mode="global")
+
+    assert torch.allclose(exact, torch.tensor([[1.0]]))
+    assert torch.allclose(global_map, raw)

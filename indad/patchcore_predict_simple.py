@@ -126,14 +126,76 @@ def normalize_vis_map(score_map):
     return (values.numpy() * 255).astype(np.uint8)
 
 
+def _patch_to_hwc(patch):
+    return patch.permute(0, 2, 3, 1).squeeze(0)
+
+
+def raw_map_global(patch, patch_lib):
+    patch_hwc = _patch_to_hwc(patch)
+    H, W, C = patch_hwc.shape
+    query = patch_hwc.reshape(-1, C)
+    lib = patch_lib.reshape(-1, patch_lib.shape[-1])
+    dist = torch.cdist(query, lib)
+    return torch.min(dist, dim=1).values.reshape(H, W)
+
+
+def raw_map_same_row(patch, patch_lib, neighbor_radius=0):
+    patch_hwc = _patch_to_hwc(patch)
+    H, W, N, C = patch_lib.shape
+    row_lib = patch_lib.reshape(H, W * N, C)
+    values = []
+    r = int(neighbor_radius)
+    for h in range(H):
+        start = max(0, h - r)
+        end = min(H, h + r + 1)
+        candidates = row_lib[start:end].reshape(-1, C)
+        dist = torch.cdist(patch_hwc[h], candidates)
+        values.append(torch.min(dist, dim=1).values)
+    return torch.stack(values, dim=0)
+
+
+def raw_map_exact_position(patch, patch_lib, neighbor_radius=0):
+    patch_hwc = _patch_to_hwc(patch)
+    H, W, N, C = patch_lib.shape
+    r = int(neighbor_radius)
+    values = torch.empty(H, W, dtype=patch_hwc.dtype, device=patch_hwc.device)
+    for h in range(H):
+        h0 = max(0, h - r)
+        h1 = min(H, h + r + 1)
+        for w in range(W):
+            w0 = max(0, w - r)
+            w1 = min(W, w + r + 1)
+            candidates = patch_lib[h0:h1, w0:w1].reshape(-1, C)
+            dist = torch.cdist(patch_hwc[h, w].reshape(1, C), candidates)
+            values[h, w] = torch.min(dist)
+    return values
+
+
+def select_score_map(raw_map, stats, match_mode):
+    if match_mode == "exact_position":
+        return apply_score_stats(raw_map, stats)
+    return raw_map
+
+
+def raw_map_by_mode(patch, patch_lib, match_mode, neighbor_radius):
+    if match_mode == "global":
+        return raw_map_global(patch, patch_lib)
+    if match_mode == "same_row":
+        return raw_map_same_row(patch, patch_lib, neighbor_radius=neighbor_radius)
+    if match_mode == "exact_position":
+        return raw_map_exact_position(patch, patch_lib, neighbor_radius=neighbor_radius)
+    raise ValueError(f"unsupported match_mode: {match_mode}")
+
+
 class PatchCorePredictor:
-    def __init__(self, model_path, backbone="resnet18", out_indices=(2, 3), image_size=(224, 224), fmap_size=None, resize_method="cv2", neighbor_radius=0, output_dir="./results-predict-simple"):
+    def __init__(self, model_path, backbone="resnet18", out_indices=(2, 3), image_size=(224, 224), fmap_size=None, resize_method="cv2", match_mode="exact_position", neighbor_radius=0, output_dir="./results-predict-simple"):
         self.model_path = Path(model_path)
         self.backbone = backbone
         self.out_indices = tuple(out_indices)
         self.image_size = list(image_size)
         self.fmap_size = list(fmap_size) if fmap_size is not None else None
         self.resize_method = resize_method
+        self.match_mode = match_mode
         self.neighbor_radius = int(neighbor_radius)
         self.output_dir = Path(output_dir)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -171,13 +233,13 @@ class PatchCorePredictor:
 
     def predict_tensor(self, sample):
         patch = self.extract_patch(sample)
-        patch = patch.permute(0, 2, 3, 1).squeeze(0).unsqueeze(2)
-        H, W, N, C = self.patch_lib.shape
-        if self.neighbor_radius != 0:
-            raise ValueError("simple predictor only supports neighbor_radius=0 in first version")
-        dist = torch.cdist(patch, self.patch_lib)
-        raw_map = torch.min(dist, dim=-1).values.reshape(H, W)
-        score_map = apply_score_stats(raw_map, self.score_stats)
+        raw_map = raw_map_by_mode(
+            patch,
+            self.patch_lib,
+            match_mode=self.match_mode,
+            neighbor_radius=self.neighbor_radius,
+        )
+        score_map = select_score_map(raw_map, self.score_stats, self.match_mode)
         score = torch.max(score_map).detach().cpu()
         return score, score_map
 
