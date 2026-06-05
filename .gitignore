@@ -8,3 +8,7 @@ datasets/
 *.spec
 __pycache__/
 CLAUDE.md
+.claude/
+.superpowers/
+tests/
+docs/superpowers/

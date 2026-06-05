@@ -276,7 +276,7 @@ class KNNExtractor(torch.nn.Module):
 
     def evaluate(self, test_dl: DataLoader) -> Tuple[float, float]:
         """Calls predict step for each test sample."""
-        
+        """
         image_preds = []
         image_labels = []
         image_labels_set = set()
@@ -309,7 +309,7 @@ class KNNExtractor(torch.nn.Module):
             pixel_rocauc = -1
 
         return image_rocauc, pixel_rocauc
-        
+        """
         # return -1,-1
 
     def get_parameters(self, extra_params : dict = None) -> dict:

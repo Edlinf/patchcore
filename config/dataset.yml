@@ -1,9 +1,18 @@
 job_no: '2604291557639'
 method: patchcore
 backbone: resnet18
-f_coreset: 0.2
+f_coreset: 1.0
 dataset_dir: ./datasets
-image_size: [1280, 128] #
-dataset: chilun
+image_size: [768, 256] #
+dataset: chilun2
 result_dir: ./results
 output_name: ###
+score_normalization:
+    enabled: false
+    min_train_patches: 4
+    scale_floor_quantile: 0.10
+    scale_cap_quantile: null
+    smooth_scale: true
+    smooth_kernel: 3
+    threshold_quantile: 0.999
+    clamp_min_zero: true
