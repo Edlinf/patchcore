@@ -53,3 +53,29 @@ def test_load_patchcore_archive_simple_supports_new_archive(tmp_path):
     assert torch.allclose(loaded, patch_lib)
     assert torch.allclose(loaded_stats["baseline"], stats["baseline"])
     assert torch.allclose(loaded_stats["scale"], stats["scale"])
+
+
+from patchcore_predict_simple import apply_score_stats, parse_model_info_simple
+
+
+def test_apply_score_stats_clamps_negative_values():
+    raw = torch.tensor([[1.0, 5.0]])
+    stats = {
+        "baseline": torch.tensor([[2.0, 1.0]]),
+        "scale": torch.tensor([[1.0, 2.0]]),
+    }
+
+    out = apply_score_stats(raw, stats)
+
+    assert torch.allclose(out, torch.tensor([[0.0, 2.0]]))
+
+
+def test_parse_model_info_simple_reads_current_filename():
+    info = parse_model_info_simple("patchcore_job_cv2_resnet18_23_16x48_3x128x384_fp32_abcd1234.ts")
+
+    assert info["method"] == "patchcore"
+    assert info["resize_method"] == "cv2"
+    assert info["backbone"] == "resnet18"
+    assert info["out_indices"] == [2, 3]
+    assert info["fmap_size"] == [16, 48]
+    assert info["image_size"] == [128, 384]

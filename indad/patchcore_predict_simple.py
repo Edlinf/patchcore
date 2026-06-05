@@ -62,5 +62,96 @@ def load_patchcore_archive_simple(path):
     return patch_lib, stats
 
 
+def parse_model_info_simple(model_path):
+    stem = Path(model_path).name.split(".")[0]
+    parts = stem.split("_")
+    if len(parts) != 9:
+        raise ValueError(f"Cannot parse model filename: {model_path}")
+    method, jobno, resize_method, backbone, out_indices, fmap_size, image_shape, precision, md5 = parts
+    if out_indices != "23":
+        raise ValueError(f"Only out_indices=23 supported by simple predictor, got {out_indices}")
+    image_shape = [int(i) for i in image_shape.split("x")]
+    return {
+        "method": method,
+        "jobno": jobno,
+        "resize_method": resize_method,
+        "backbone": backbone.replace("-", "_"),
+        "out_indices": [2, 3],
+        "fmap_size": [int(i) for i in fmap_size.split("x")],
+        "image_size": [image_shape[1], image_shape[2]],
+    }
+
+
+def apply_score_stats(raw_map, stats):
+    if stats is None:
+        return raw_map
+    baseline = stats["baseline"].to(raw_map.device)
+    scale = stats["scale"].to(raw_map.device)
+    if baseline.shape != raw_map.shape or scale.shape != raw_map.shape:
+        return raw_map
+    return torch.clamp_min((raw_map.float() - baseline.float()) / scale.float(), 0.0)
+
+
+def build_transform(image_size, resize_method):
+    resize = Cv2AdaptiveResize(image_size) if resize_method == "cv2" else TransformAdaptiveResize(image_size)
+    return transforms.Compose([
+        resize,
+        transforms.ToTensor(),
+        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+    ])
+
+
+def normalize_vis_map(score_map):
+    values = score_map.detach().cpu().float()
+    values = values - values.min()
+    if values.max() > 0:
+        values = values / values.max()
+    return (values.numpy() * 255).astype(np.uint8)
+
+
+class PatchCorePredictor:
+    def __init__(self, model_path, backbone="resnet18", out_indices=(2, 3), image_size=(224, 224), fmap_size=None, resize_method="cv2", neighbor_radius=0, output_dir="./results-predict-simple"):
+        self.model_path = Path(model_path)
+        self.backbone = backbone
+        self.out_indices = tuple(out_indices)
+        self.image_size = list(image_size)
+        self.fmap_size = list(fmap_size) if fmap_size is not None else None
+        self.resize_method = resize_method
+        self.neighbor_radius = int(neighbor_radius)
+        self.output_dir = Path(output_dir)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.average = torch.nn.AvgPool2d(3, stride=1)
+        self.resize = None
+        self.feature_extractor = None
+        self.patch_lib = None
+        self.score_stats = None
+        self.transform = build_transform(self.image_size, self.resize_method)
+
+    def load(self):
+        project_root = Path(__file__).resolve().parents[1]
+        torch.hub.set_dir(str(project_root / "hub"))
+        self.feature_extractor = timm.create_model(
+            self.backbone,
+            out_indices=self.out_indices,
+            features_only=True,
+            pretrained=True,
+        )
+        self.feature_extractor.eval().to(self.device)
+        self.patch_lib, self.score_stats = load_patchcore_archive_simple(self.model_path)
+        self.patch_lib = self.patch_lib.to(self.device)
+        if self.fmap_size is not None:
+            self.resize = torch.nn.AdaptiveAvgPool2d(self.fmap_size)
+        return self
+
+    def extract_patch(self, sample):
+        with torch.no_grad():
+            feature_maps = self.feature_extractor(sample.to(self.device))
+        if self.resize is None:
+            self.fmap_size = list(feature_maps[0].shape[-2:])
+            self.resize = torch.nn.AdaptiveAvgPool2d(self.fmap_size)
+        resized_maps = [self.resize(self.average(fmap)) for fmap in feature_maps]
+        return torch.cat(resized_maps, 1)
+
+
 if __name__ == "__main__":
     pass
