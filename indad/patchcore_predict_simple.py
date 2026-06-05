@@ -152,6 +152,108 @@ class PatchCorePredictor:
         resized_maps = [self.resize(self.average(fmap)) for fmap in feature_maps]
         return torch.cat(resized_maps, 1)
 
+    def predict_tensor(self, sample):
+        patch = self.extract_patch(sample)
+        patch = patch.permute(0, 2, 3, 1).squeeze(0).unsqueeze(2)
+        H, W, N, C = self.patch_lib.shape
+        if self.neighbor_radius != 0:
+            raise ValueError("simple predictor only supports neighbor_radius=0 in first version")
+        dist = torch.cdist(patch, self.patch_lib)
+        raw_map = torch.min(dist, dim=-1).values.reshape(H, W)
+        score_map = apply_score_stats(raw_map, self.score_stats)
+        score = torch.max(score_map).detach().cpu()
+        return score, score_map
+
+    def preprocess_image(self, image_path):
+        image = Image.open(image_path).convert("RGB")
+        sample = self.transform(image).unsqueeze(0)
+        return image, sample
+
+    def predict_image(self, image_path):
+        start = time.time()
+        image, sample = self.preprocess_image(image_path)
+        score, score_map = self.predict_tensor(sample)
+        elapsed_ms = (time.time() - start) * 1000
+        return image, float(score.item()), score_map, elapsed_ms
+
+
+def save_heatmap_outputs(image, score_map, image_path, output_dir):
+    output_dir = Path(output_dir)
+    heatmap_dir = output_dir / "heatmaps"
+    heatmap_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(image_path).stem
+    heat = normalize_vis_map(score_map)
+    heat = cv2.resize(heat, image.size)
+    heat_color = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
+    image_bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+    overlay = cv2.addWeighted(heat_color, 0.5, image_bgr, 0.5, 0)
+    heatmap_path = heatmap_dir / f"{stem}_heatmap.jpg"
+    overlay_path = heatmap_dir / f"{stem}_overlay.jpg"
+    cv2.imwrite(str(heatmap_path), heat_color)
+    cv2.imwrite(str(overlay_path), overlay)
+    return heatmap_path, overlay_path
+
+
+def write_scores_csv(path, rows):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["path", "score", "elapsed_ms", "heatmap_path", "overlay_path"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+@click.command()
+@click.option("--model", "model_path", required=True, type=Path)
+@click.option("--image", type=Path, default=None)
+@click.option("--input", "input_path", type=Path, default=None)
+@click.option("--output", "output_dir", type=Path, default=Path("./results-predict-simple"))
+@click.option("--backbone", default="")
+@click.option("--image-size", default="")
+@click.option("--fmap-size", default="")
+@click.option("--resize-method", default="")
+@click.option("--out-indices", default="2,3")
+@click.option("--neighbor-radius", default=0, type=int)
+def cli_interface(model_path, image, input_path, output_dir, backbone, image_size, fmap_size, resize_method, out_indices, neighbor_radius):
+    if image is None and input_path is None:
+        raise click.UsageError("Provide --image or --input")
+    try:
+        info = parse_model_info_simple(model_path)
+    except ValueError:
+        info = {}
+    backbone = backbone or info.get("backbone", "resnet18")
+    resize_method = resize_method or info.get("resize_method", "cv2")
+    image_size = parse_pair(image_size) if image_size else info.get("image_size", [224, 224])
+    fmap_size = parse_pair(fmap_size) if fmap_size else info.get("fmap_size")
+    out_indices = tuple(int(i) for i in out_indices.split(","))
+
+    predictor = PatchCorePredictor(
+        model_path=model_path,
+        backbone=backbone,
+        out_indices=out_indices,
+        image_size=image_size,
+        fmap_size=fmap_size,
+        resize_method=resize_method,
+        neighbor_radius=neighbor_radius,
+        output_dir=output_dir,
+    ).load()
+
+    images = [image] if image is not None else collect_images(input_path)
+    rows = []
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for image_path in images:
+        src_image, score, score_map, elapsed_ms = predictor.predict_image(image_path)
+        heatmap_path, overlay_path = save_heatmap_outputs(src_image, score_map, image_path, output_dir)
+        rows.append({
+            "path": str(image_path),
+            "score": score,
+            "elapsed_ms": round(elapsed_ms, 2),
+            "heatmap_path": str(heatmap_path),
+            "overlay_path": str(overlay_path),
+        })
+        print(f"{image_path}: score={score:.4f}, elapsed_ms={elapsed_ms:.1f}")
+    write_scores_csv(output_dir / "scores.csv", rows)
+
 
 if __name__ == "__main__":
-    pass
+    cli_interface()
