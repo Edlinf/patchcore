@@ -11,6 +11,7 @@ import torch
 from PIL import Image
 from torchvision import transforms
 import timm
+from sklearn.metrics import roc_auc_score
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from data import Cv2AdaptiveResize, IMAGENET_MEAN, IMAGENET_STD, TransformAdaptiveResize
@@ -32,7 +33,23 @@ def collect_images(path):
     path = Path(path)
     if path.is_file():
         return [path]
-    return sorted(p for p in path.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES)
+    direct = sorted(p for p in path.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES)
+    if direct:
+        return direct
+    images = []
+    for child in sorted(path.iterdir()):
+        if child.is_dir():
+            images.extend(sorted(p for p in child.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES))
+    return images
+
+
+def infer_label_from_path(path):
+    parent = Path(path).parent.name.lower()
+    if parent in ("good", "ok", "normal"):
+        return 0
+    if parent in ("bad", "ng", "defect", "abnormal"):
+        return 1
+    return -1
 
 
 def load_patchcore_archive_simple(path):
@@ -177,30 +194,55 @@ class PatchCorePredictor:
         return image, float(score.item()), score_map, elapsed_ms
 
 
-def save_heatmap_outputs(image, score_map, image_path, output_dir):
+def save_heatmap_outputs(image, score_map, image_path, output_dir, label, score, elapsed_ms):
     output_dir = Path(output_dir)
     heatmap_dir = output_dir / "heatmaps"
     heatmap_dir.mkdir(parents=True, exist_ok=True)
     stem = Path(image_path).stem
+    classname = Path(image_path).parent.name
+    score_text = f"{score:.2f}"
+    elapsed_text = f"{elapsed_ms:.0f}ms"
+    out_name = f"{classname}_{stem}_{score_text}_{elapsed_text}.jpg"
+
     heat = normalize_vis_map(score_map)
     heat = cv2.resize(heat, image.size)
     heat_color = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
     image_bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
     overlay = cv2.addWeighted(heat_color, 0.5, image_bgr, 0.5, 0)
-    heatmap_path = heatmap_dir / f"{stem}_heatmap.jpg"
-    overlay_path = heatmap_dir / f"{stem}_overlay.jpg"
-    cv2.imwrite(str(heatmap_path), heat_color)
-    cv2.imwrite(str(overlay_path), overlay)
-    return heatmap_path, overlay_path
+    combined = cv2.hconcat([heat_color, overlay])
+    combined_path = heatmap_dir / out_name
+    cv2.imwrite(str(combined_path), combined)
+    return combined_path
 
 
 def write_scores_csv(path, rows):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["path", "score", "elapsed_ms", "heatmap_path", "overlay_path"])
+        writer = csv.DictWriter(f, fieldnames=["path", "label", "score", "elapsed_ms", "result_path"])
         writer.writeheader()
         writer.writerows(rows)
+
+
+def write_metrics_json(path, rows):
+    labels = [int(r["label"]) for r in rows if int(r["label"]) >= 0]
+    scores = [float(r["score"]) for r in rows if int(r["label"]) >= 0]
+    label_set = set(labels)
+    if len(label_set) > 1:
+        image_rocauc = float(roc_auc_score(labels, scores))
+    else:
+        image_rocauc = -1
+    path.write_text(
+        "{\n"
+        f"  \"image_rocauc\": {image_rocauc},\n"
+        f"  \"num_images\": {len(rows)},\n"
+        f"  \"num_labeled\": {len(labels)},\n"
+        f"  \"num_positive\": {labels.count(1)},\n"
+        f"  \"num_negative\": {labels.count(0)}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    return image_rocauc
 
 
 @click.command()
@@ -243,16 +285,19 @@ def cli_interface(model_path, image, input_path, output_dir, backbone, image_siz
     output_dir.mkdir(parents=True, exist_ok=True)
     for image_path in images:
         src_image, score, score_map, elapsed_ms = predictor.predict_image(image_path)
-        heatmap_path, overlay_path = save_heatmap_outputs(src_image, score_map, image_path, output_dir)
+        label = infer_label_from_path(image_path)
+        result_path = save_heatmap_outputs(src_image, score_map, image_path, output_dir, label, score, elapsed_ms)
         rows.append({
             "path": str(image_path),
+            "label": label,
             "score": score,
             "elapsed_ms": round(elapsed_ms, 2),
-            "heatmap_path": str(heatmap_path),
-            "overlay_path": str(overlay_path),
+            "result_path": str(result_path),
         })
-        print(f"{image_path}: score={score:.4f}, elapsed_ms={elapsed_ms:.1f}")
+        print(f"{image_path}: label={label}, score={score:.4f}, elapsed_ms={elapsed_ms:.1f}")
     write_scores_csv(output_dir / "scores.csv", rows)
+    image_rocauc = write_metrics_json(output_dir / "metrics.json", rows)
+    print(f"image_rocauc={image_rocauc:.4f}")
 
 
 if __name__ == "__main__":

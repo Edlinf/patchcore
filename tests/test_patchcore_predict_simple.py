@@ -9,7 +9,7 @@ INDAD = ROOT / "indad"
 if str(INDAD) not in sys.path:
     sys.path.insert(0, str(INDAD))
 
-from patchcore_predict_simple import collect_images, load_patchcore_archive_simple, parse_pair
+from patchcore_predict_simple import collect_images, infer_label_from_path, load_patchcore_archive_simple, parse_pair
 from models import save_patchcore_archive, save_tensor
 
 
@@ -18,7 +18,7 @@ def test_parse_pair_reads_width_height():
     assert parse_pair("48x16") == [48, 16]
 
 
-def test_collect_images_reads_flat_directory_only(tmp_path):
+def test_collect_images_reads_flat_directory_or_labeled_children(tmp_path):
     (tmp_path / "a.jpg").write_bytes(b"x")
     (tmp_path / "b.png").write_bytes(b"x")
     (tmp_path / "nested").mkdir()
@@ -27,6 +27,24 @@ def test_collect_images_reads_flat_directory_only(tmp_path):
     images = collect_images(tmp_path)
 
     assert [p.name for p in images] == ["a.jpg", "b.png"]
+
+    root = tmp_path / "labeled"
+    (root / "good").mkdir(parents=True)
+    (root / "bad").mkdir(parents=True)
+    (root / "good" / "ok.jpg").write_bytes(b"x")
+    (root / "bad" / "ng.jpg").write_bytes(b"x")
+
+    labeled_images = collect_images(root)
+
+    assert [p.name for p in labeled_images] == ["ng.jpg", "ok.jpg"]
+
+
+def test_infer_label_from_path_uses_parent_directory():
+    assert infer_label_from_path(Path("D:/data/test/good/a.jpg")) == 0
+    assert infer_label_from_path(Path("D:/data/test/OK/a.jpg")) == 0
+    assert infer_label_from_path(Path("D:/data/test/bad/a.jpg")) == 1
+    assert infer_label_from_path(Path("D:/data/test/NG/a.jpg")) == 1
+    assert infer_label_from_path(Path("D:/data/test/unknown/a.jpg")) == -1
 
 
 def test_load_patchcore_archive_simple_supports_old_archive(tmp_path):
