@@ -2,6 +2,7 @@ import csv
 import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import click
@@ -17,6 +18,15 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from data import Cv2AdaptiveResize, IMAGENET_MEAN, IMAGENET_STD, TransformAdaptiveResize
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp"}
+
+
+@dataclass
+class BigTile:
+    index: int
+    row: int
+    col: int
+    image: Image.Image
+    box: tuple
 
 
 def parse_pair(value):
@@ -128,6 +138,29 @@ def normalize_vis_map(score_map):
     if values.max() > 0:
         values = values / values.max()
     return (values.numpy() * 255).astype(np.uint8)
+
+
+def split_big_image_by_geometry(image, rows, cols, top_margin, bottom_margin, left_margin, right_margin, hori_gap, vert_gap):
+    width, height = image.size
+    available_width = width - left_margin - right_margin - (cols - 1) * hori_gap
+    available_height = height - top_margin - bottom_margin - (rows - 1) * vert_gap
+    if available_width <= 0 or available_height <= 0:
+        raise ValueError("invalid big-image geometry parameters")
+    tile_w = available_width // cols
+    tile_h = available_height // rows
+
+    tiles = []
+    index = 0
+    for row in range(rows):
+        for col in range(cols):
+            x1 = left_margin + col * (tile_w + hori_gap)
+            y1 = top_margin + row * (tile_h + vert_gap)
+            x2 = x1 + tile_w
+            y2 = y1 + tile_h
+            box = (x1, y1, x2, y2)
+            tiles.append(BigTile(index=index, row=row, col=col, image=image.crop(box), box=box))
+            index += 1
+    return tiles
 
 
 def _patch_to_hwc(patch):
@@ -296,6 +329,48 @@ class PatchCorePredictor:
         elapsed_ms = (time.time() - start) * 1000
         return image, float(score.item()), score_map, elapsed_ms
 
+    def predict_big_image(self, image_path, rows, cols, top_margin, bottom_margin, left_margin, right_margin, hori_gap, vert_gap):
+        start = time.time()
+        image = Image.open(image_path).convert("RGB")
+        full_score = np.zeros((image.height, image.width), dtype=np.float32)
+        tiles = split_big_image_by_geometry(
+            image,
+            rows=rows,
+            cols=cols,
+            top_margin=top_margin,
+            bottom_margin=bottom_margin,
+            left_margin=left_margin,
+            right_margin=right_margin,
+            hori_gap=hori_gap,
+            vert_gap=vert_gap,
+        )
+        tile_rows = []
+        for tile in tiles:
+            sample = self.transform(tile.image).unsqueeze(0)
+            score, score_map = self.predict_tensor(sample)
+            score_value = float(score.item())
+            stitch_tile_score(full_score, score_map, tile.box)
+            tile_rows.append({
+                "tile_index": tile.index,
+                "row": tile.row,
+                "col": tile.col,
+                "score": score_value,
+                "x1": tile.box[0],
+                "y1": tile.box[1],
+                "x2": tile.box[2],
+                "y2": tile.box[3],
+            })
+        elapsed_ms = (time.time() - start) * 1000
+        score = float(full_score.max())
+        return image, score, torch.from_numpy(full_score), elapsed_ms, tile_rows
+
+
+def stitch_tile_score(full_score, tile_score_map, box):
+    x1, y1, x2, y2 = box
+    tile_score = tile_score_map.detach().cpu().float().numpy()
+    tile_score = cv2.resize(tile_score, (x2 - x1, y2 - y1))
+    full_score[y1:y2, x1:x2] = tile_score
+
 
 def save_heatmap_outputs(image, score_map, image_path, output_dir, label, score, elapsed_ms):
     output_dir = Path(output_dir)
@@ -324,6 +399,15 @@ def write_scores_csv(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["path", "label", "score", "elapsed_ms", "result_path"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_tile_scores_csv(path, rows):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["path", "tile_index", "row", "col", "score", "x1", "y1", "x2", "y2"])
         writer.writeheader()
         writer.writerows(rows)
 
@@ -361,7 +445,16 @@ def write_metrics_json(path, rows):
 @click.option("--out-indices", default="2,3")
 @click.option("--match-mode", default="exact_position", type=click.Choice(["global", "same_row", "exact_position"]))
 @click.option("--neighbor-radius", default=0, type=int)
-def cli_interface(model_path, image, input_path, output_dir, backbone, image_size, fmap_size, resize_method, out_indices, match_mode, neighbor_radius):
+@click.option("--big-image", is_flag=True)
+@click.option("--rows", default=5, type=int)
+@click.option("--cols", default=3, type=int)
+@click.option("--top-margin", default=626, type=int)
+@click.option("--bottom-margin", default=626, type=int)
+@click.option("--left-margin", default=3, type=int)
+@click.option("--right-margin", default=3, type=int)
+@click.option("--hori-gap", default=1, type=int)
+@click.option("--vert-gap", default=1, type=int)
+def cli_interface(model_path, image, input_path, output_dir, backbone, image_size, fmap_size, resize_method, out_indices, match_mode, neighbor_radius, big_image, rows, cols, top_margin, bottom_margin, left_margin, right_margin, hori_gap, vert_gap):
     if image is None and input_path is None:
         raise click.UsageError("Provide --image or --input")
     try:
@@ -387,13 +480,30 @@ def cli_interface(model_path, image, input_path, output_dir, backbone, image_siz
     ).load()
 
     images = [image] if image is not None else collect_images(input_path)
-    rows = []
+    score_rows = []
+    all_tile_rows = []
     output_dir.mkdir(parents=True, exist_ok=True)
     for image_path in images:
-        src_image, score, score_map, elapsed_ms = predictor.predict_image(image_path)
+        if big_image:
+            src_image, score, score_map, elapsed_ms, tile_rows = predictor.predict_big_image(
+                image_path,
+                rows=rows,
+                cols=cols,
+                top_margin=top_margin,
+                bottom_margin=bottom_margin,
+                left_margin=left_margin,
+                right_margin=right_margin,
+                hori_gap=hori_gap,
+                vert_gap=vert_gap,
+            )
+            for tile_row in tile_rows:
+                tile_row["path"] = str(image_path)
+                all_tile_rows.append(tile_row)
+        else:
+            src_image, score, score_map, elapsed_ms = predictor.predict_image(image_path)
         label = infer_label_from_path(image_path)
         result_path = save_heatmap_outputs(src_image, score_map, image_path, output_dir, label, score, elapsed_ms)
-        rows.append({
+        score_rows.append({
             "path": str(image_path),
             "label": label,
             "score": score,
@@ -401,8 +511,10 @@ def cli_interface(model_path, image, input_path, output_dir, backbone, image_siz
             "result_path": str(result_path),
         })
         print(f"{image_path}: label={label}, score={score:.4f}, elapsed_ms={elapsed_ms:.1f}")
-    write_scores_csv(output_dir / "scores.csv", rows)
-    image_rocauc = write_metrics_json(output_dir / "metrics.json", rows)
+    write_scores_csv(output_dir / "scores.csv", score_rows)
+    if all_tile_rows:
+        write_tile_scores_csv(output_dir / "tile_scores.csv", all_tile_rows)
+    image_rocauc = write_metrics_json(output_dir / "metrics.json", score_rows)
     print(f"image_rocauc={image_rocauc:.4f}")
 
 

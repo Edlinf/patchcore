@@ -2,7 +2,9 @@ import os
 import sys
 from pathlib import Path
 
+import numpy as np
 import torch
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 INDAD = ROOT / "indad"
@@ -80,6 +82,8 @@ from patchcore_predict_simple import (
     raw_map_global,
     raw_map_same_row,
     select_score_map,
+    split_big_image_by_geometry,
+    stitch_tile_score,
 )
 
 
@@ -166,3 +170,43 @@ def test_select_score_map_applies_stats_only_for_exact_position():
 
     assert torch.allclose(exact, torch.tensor([[1.0]]))
     assert torch.allclose(global_map, raw)
+
+
+def test_split_big_image_by_geometry_matches_prepare_py_layout():
+    arr = np.zeros((8, 10, 3), dtype=np.uint8)
+    arr[2:4, 1:4] = [10, 0, 0]
+    arr[2:4, 5:8] = [20, 0, 0]
+    arr[5:7, 1:4] = [30, 0, 0]
+    arr[5:7, 5:8] = [40, 0, 0]
+    image = Image.fromarray(arr, "RGB")
+
+    tiles = split_big_image_by_geometry(
+        image,
+        rows=2,
+        cols=2,
+        top_margin=2,
+        bottom_margin=1,
+        left_margin=1,
+        right_margin=2,
+        hori_gap=1,
+        vert_gap=1,
+    )
+
+    assert len(tiles) == 4
+    assert tiles[0].box == (1, 2, 4, 4)
+    assert tiles[1].box == (5, 2, 8, 4)
+    assert tiles[2].box == (1, 5, 4, 7)
+    assert tiles[3].box == (5, 5, 8, 7)
+    assert np.asarray(tiles[3].image)[0, 0].tolist() == [40, 0, 0]
+
+
+def test_stitch_tile_score_keeps_margins_and_gaps_zero():
+    full = np.zeros((8, 10), dtype=np.float32)
+    tile_score = torch.ones(2, 3)
+
+    stitch_tile_score(full, tile_score, box=(1, 2, 4, 4))
+
+    assert full[0].sum() == 0
+    assert full[:, 0].sum() == 0
+    assert np.allclose(full[2:4, 1:4], 1.0)
+    assert full[4].sum() == 0
