@@ -388,7 +388,7 @@ def save_heatmap_outputs(image, score_map, image_path, output_dir, label, score,
     heat_color = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
     image_bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
     overlay = cv2.addWeighted(heat_color, 0.5, image_bgr, 0.5, 0)
-    combined = cv2.hconcat([heat_color, overlay])
+    combined = cv2.hconcat([image_bgr, overlay])
     combined_path = heatmap_dir / out_name
     cv2.imwrite(str(combined_path), combined)
     return combined_path
