@@ -317,8 +317,9 @@ def write_metrics_json(path, rows):
 @click.option("--fmap-size", default="")
 @click.option("--resize-method", default="")
 @click.option("--out-indices", default="2,3")
+@click.option("--match-mode", default="exact_position", type=click.Choice(["global", "same_row", "exact_position"]))
 @click.option("--neighbor-radius", default=0, type=int)
-def cli_interface(model_path, image, input_path, output_dir, backbone, image_size, fmap_size, resize_method, out_indices, neighbor_radius):
+def cli_interface(model_path, image, input_path, output_dir, backbone, image_size, fmap_size, resize_method, out_indices, match_mode, neighbor_radius):
     if image is None and input_path is None:
         raise click.UsageError("Provide --image or --input")
     try:
@@ -338,6 +339,7 @@ def cli_interface(model_path, image, input_path, output_dir, backbone, image_siz
         image_size=image_size,
         fmap_size=fmap_size,
         resize_method=resize_method,
+        match_mode=match_mode,
         neighbor_radius=neighbor_radius,
         output_dir=output_dir,
     ).load()
