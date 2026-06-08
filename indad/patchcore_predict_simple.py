@@ -251,7 +251,7 @@ def raw_map_by_mode(patch, patch_lib, match_mode, neighbor_radius):
 
 
 class PatchCorePredictor:
-    def __init__(self, model_path, backbone="resnet18", out_indices=(2, 3), image_size=(224, 224), fmap_size=None, resize_method="cv2", match_mode="exact_position", neighbor_radius=0, output_dir="./results-predict-simple"):
+    def __init__(self, model_path, backbone="resnet18", out_indices=(2, 3), image_size=(224, 224), fmap_size=None, resize_method="cv2", match_mode="exact_position", neighbor_radius=0, device="auto", output_dir="./results-predict-simple"):
         self.model_path = Path(model_path)
         self.backbone = backbone
         self.out_indices = tuple(out_indices)
@@ -261,7 +261,10 @@ class PatchCorePredictor:
         self.match_mode = match_mode
         self.neighbor_radius = int(neighbor_radius)
         self.output_dir = Path(output_dir)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if device == "auto":
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = torch.device(device)
         self.average = torch.nn.AvgPool2d(3, stride=1)
         self.resize = None
         self.feature_extractor = None
@@ -443,6 +446,7 @@ def write_metrics_json(path, rows):
 @click.option("--out-indices", default="2,3")
 @click.option("--match-mode", default="exact_position", type=click.Choice(["global", "same_row", "exact_position"]))
 @click.option("--neighbor-radius", default=0, type=int)
+@click.option("--device", default="auto", type=click.Choice(["auto", "cuda", "cpu"]))
 @click.option("--big-image", is_flag=True)
 @click.option("--rows", default=5, type=int)
 @click.option("--cols", default=3, type=int)
@@ -452,7 +456,7 @@ def write_metrics_json(path, rows):
 @click.option("--right-margin", default=3, type=int)
 @click.option("--hori-gap", default=1, type=int)
 @click.option("--vert-gap", default=1, type=int)
-def cli_interface(model_path, image, input_path, output_dir, backbone, image_size, fmap_size, resize_method, out_indices, match_mode, neighbor_radius, big_image, rows, cols, top_margin, bottom_margin, left_margin, right_margin, hori_gap, vert_gap):
+def cli_interface(model_path, image, input_path, output_dir, backbone, image_size, fmap_size, resize_method, out_indices, match_mode, neighbor_radius, device, big_image, rows, cols, top_margin, bottom_margin, left_margin, right_margin, hori_gap, vert_gap):
     if image is None and input_path is None:
         raise click.UsageError("Provide --image or --input")
     try:
@@ -474,6 +478,7 @@ def cli_interface(model_path, image, input_path, output_dir, backbone, image_siz
         resize_method=resize_method,
         match_mode=match_mode,
         neighbor_radius=neighbor_radius,
+        device=device,
         output_dir=output_dir,
     ).load()
 

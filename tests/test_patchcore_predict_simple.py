@@ -81,6 +81,7 @@ from patchcore_predict_simple import (
     raw_map_exact_position,
     raw_map_global,
     raw_map_same_row,
+    PatchCorePredictor,
     select_score_map,
     split_big_image_by_geometry,
     stitch_tile_score,
@@ -108,6 +109,12 @@ def test_parse_model_info_simple_reads_current_filename():
     assert info["out_indices"] == [2, 3]
     assert info["fmap_size"] == [16, 48]
     assert info["image_size"] == [384, 128]
+
+
+def test_predictor_device_can_be_forced_to_cpu():
+    predictor = PatchCorePredictor("dummy.ts", device="cpu")
+
+    assert predictor.device.type == "cpu"
 
 
 def test_raw_map_global_matches_any_position():
