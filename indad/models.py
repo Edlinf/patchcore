@@ -310,7 +310,7 @@ class KNNExtractor(torch.nn.Module):
 
         return image_rocauc, pixel_rocauc
         """
-        # return -1,-1
+        return -1,-1
 
     def get_parameters(self, extra_params : dict = None) -> dict:
         return {
@@ -567,7 +567,8 @@ class PatchCore(KNNExtractor):
             H = self.patch_lib.shape[0]
             W = self.patch_lib.shape[1]
             if self.max_feature_count == 0:
-                n = min(int(self.f_coreset * self.patch_lib.shape[2]), 60000//(H*W))
+                # n = min(int(self.f_coreset * self.patch_lib.shape[2]), 60000//(H*W))
+                n = int(self.f_coreset * self.patch_lib.shape[2])
             else:
                 n = min(int(self.f_coreset * self.patch_lib.shape[2]), self.max_feature_count//(H*W))
             n = max(n, 1) # at least 1 patch per position, otherwise SparseRandomProjection will complain.

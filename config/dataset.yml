@@ -1,10 +1,10 @@
 job_no: '2604291557639'
 method: patchcore
 backbone: resnet18
-f_coreset: 1.0
+f_coreset: 0.5
 dataset_dir: ./datasets
 image_size: [768, 256] #
-dataset: chilun2
+dataset: chilun2_output
 result_dir: ./results
 output_name: ###
 score_normalization:

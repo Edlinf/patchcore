@@ -1,5 +1,16 @@
 # 更新日志
 
+## v5.1
+
+- 修复 standalone predictor 从模型文件名解析 `image_size` 时的宽高顺序，按 `3xH xW` 解析为 `[W, H]`，保证与 `Cv2AdaptiveResize` 的输入语义一致。
+- standalone predictor 输出图调整为 `[原图 | 叠加图]`，替代 `[heatmap | 叠加图]`，便于直接对照原始外观。
+- 新增大图推理模式 `--big-image`，按固定几何参数将拼接大图在内存中切成 tile，逐 tile 计算并拼回整张大图 heatmap，边框和间隔区域保持异常分数 0。
+- 大图推理输出 `tile_scores.csv`，记录每个 tile 的行列、坐标和异常分数。
+- standalone predictor 的 raw map 计算改为 batch-aware，输入 patch `[B, C, H, W]` 后统一输出 `[B, H, W]`。
+- 大图推理将所有 tile 组成 `[B, C, H, W]` 后批量推理，减少重复 backbone 调用。
+- `global`、`same_row`、`exact_position` 三种匹配模式均支持 batch raw map；`same_row` 和 `exact_position` 的邻域匹配继续使用向量化滑动窗口。
+- `PatchCore` 默认 coreset 数量不再受 `60000//(H*W)` 上限限制，按 `f_coreset * N` 计算；评估阶段当前临时返回 `-1, -1`。
+
 ## v5.0
 
 - 新增独立 PatchCore 推理脚本 `indad/patchcore_predict_simple.py`，包含单独的 `PatchCorePredictor` 类，不依赖训练侧 `models.PatchCore`。
