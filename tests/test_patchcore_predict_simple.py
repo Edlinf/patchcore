@@ -116,7 +116,7 @@ def test_raw_map_global_matches_any_position():
 
     raw = raw_map_global(patch, patch_lib)
 
-    assert torch.allclose(raw, torch.tensor([[5.0, 0.0]]))
+    assert torch.allclose(raw, torch.tensor([[[5.0, 0.0]]]))
 
 
 def test_raw_map_exact_position_radius_zero_matches_same_position():
@@ -125,7 +125,7 @@ def test_raw_map_exact_position_radius_zero_matches_same_position():
 
     raw = raw_map_exact_position(patch, patch_lib, neighbor_radius=0)
 
-    assert torch.allclose(raw, torch.tensor([[5.0, 3.0]]))
+    assert torch.allclose(raw, torch.tensor([[[5.0, 3.0]]]))
 
 
 def test_raw_map_exact_position_radius_one_can_match_neighbor_position():
@@ -134,7 +134,7 @@ def test_raw_map_exact_position_radius_one_can_match_neighbor_position():
 
     raw = raw_map_exact_position(patch, patch_lib, neighbor_radius=1)
 
-    assert torch.allclose(raw, torch.tensor([[5.0, 0.0]]))
+    assert torch.allclose(raw, torch.tensor([[[5.0, 0.0]]]))
 
 
 def test_raw_map_same_row_radius_zero_matches_same_row():
@@ -146,7 +146,7 @@ def test_raw_map_same_row_radius_zero_matches_same_row():
 
     raw = raw_map_same_row(patch, patch_lib, neighbor_radius=0)
 
-    assert torch.allclose(raw, torch.tensor([[1.0, 1.0], [11.0, 1.0]]))
+    assert torch.allclose(raw, torch.tensor([[[1.0, 1.0], [11.0, 1.0]]]))
 
 
 def test_raw_map_same_row_radius_one_can_match_neighbor_row():
@@ -158,17 +158,53 @@ def test_raw_map_same_row_radius_one_can_match_neighbor_row():
 
     raw = raw_map_same_row(patch, patch_lib, neighbor_radius=1)
 
-    assert torch.allclose(raw, torch.tensor([[1.0], [19.0]]))
+    assert torch.allclose(raw, torch.tensor([[[1.0], [19.0]]]))
+
+
+def test_raw_map_exact_position_supports_batch_dimension():
+    patch = torch.tensor([
+        [[[0.0, 10.0]]],
+        [[[5.0, 12.0]]],
+    ])
+    patch_lib = torch.tensor([[[[0.0]], [[10.0]]]])
+
+    raw = raw_map_exact_position(patch, patch_lib, neighbor_radius=0)
+
+    assert torch.allclose(raw, torch.tensor([[[0.0, 0.0]], [[5.0, 2.0]]]))
+
+
+def test_raw_map_same_row_supports_batch_dimension():
+    patch = torch.tensor([
+        [[[0.0, 10.0]]],
+        [[[2.0, 12.0]]],
+    ])
+    patch_lib = torch.tensor([[[[0.0]], [[10.0]]]])
+
+    raw = raw_map_same_row(patch, patch_lib, neighbor_radius=0)
+
+    assert torch.allclose(raw, torch.tensor([[[0.0, 0.0]], [[2.0, 2.0]]]))
+
+
+def test_raw_map_global_supports_batch_dimension():
+    patch = torch.tensor([
+        [[[0.0, 10.0]]],
+        [[[2.0, 12.0]]],
+    ])
+    patch_lib = torch.tensor([[[[0.0]], [[10.0]]]])
+
+    raw = raw_map_global(patch, patch_lib)
+
+    assert torch.allclose(raw, torch.tensor([[[0.0, 0.0]], [[2.0, 2.0]]]))
 
 
 def test_select_score_map_applies_stats_only_for_exact_position():
-    raw = torch.tensor([[3.0]])
+    raw = torch.tensor([[[3.0]]])
     stats = {"baseline": torch.tensor([[1.0]]), "scale": torch.tensor([[2.0]])}
 
     exact = select_score_map(raw, stats, match_mode="exact_position")
     global_map = select_score_map(raw, stats, match_mode="global")
 
-    assert torch.allclose(exact, torch.tensor([[1.0]]))
+    assert torch.allclose(exact, torch.tensor([[[1.0]]]))
     assert torch.allclose(global_map, raw)
 
 

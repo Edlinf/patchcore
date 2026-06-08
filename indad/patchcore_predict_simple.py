@@ -113,13 +113,13 @@ def parse_model_info_simple(model_path):
 
 
 def apply_score_stats(raw_map, stats):
-    # raw_map / baseline / scale 都是 [H, W]。
+    # raw_map 可以是 [H, W] 或 [B, H, W]；baseline / scale 是 [H, W]。
     # 仅在 exact_position 模式下使用，用每个位置自己的正常分数分布做归一化。
     if stats is None:
         return raw_map
     baseline = stats["baseline"].to(raw_map.device)
     scale = stats["scale"].to(raw_map.device)
-    if baseline.shape != raw_map.shape or scale.shape != raw_map.shape:
+    if raw_map.shape[-2:] != baseline.shape or raw_map.shape[-2:] != scale.shape:
         return raw_map
     return torch.clamp_min((raw_map.float() - baseline.float()) / scale.float(), 0.0)
 
@@ -164,82 +164,74 @@ def split_big_image_by_geometry(image, rows, cols, top_margin, bottom_margin, le
     return tiles
 
 
-def _patch_to_hwc(patch):
-    # patch: [1, C, H, W] -> [H, W, C]
-    return patch.permute(0, 2, 3, 1).squeeze(0)
+def _patch_to_hwbc(patch):
+    # patch: [B, C, H, W] -> [H, W, B, C]
+    return patch.permute(2, 3, 0, 1)
 
 
 def raw_map_global(patch, patch_lib):
-    # patch: [1, C, H, W]
+    # patch: [B, C, H, W]
     # patch_lib: [H, W, N, C]
-    # global 模式把所有位置展开成一个大库：[H*W*N, C]。
-    patch_hwc = _patch_to_hwc(patch)
-    H, W, C = patch_hwc.shape
-    query = patch_hwc.reshape(-1, C)  # [H*W, C]
+    # global 模式不关心空间位置，query 直接展开成 [B*H*W, C]。
+    B, C, H, W = patch.shape
+    query = patch.permute(0, 2, 3, 1).reshape(B * H * W, C)  # [B*H*W, C]
     lib = patch_lib.reshape(-1, patch_lib.shape[-1])  # [H*W*N, C]
-    dist = torch.cdist(query, lib)  # [H*W, H*W*N]
-    return torch.min(dist, dim=1).values.reshape(H, W)  # [H, W]
+    dist = torch.cdist(query, lib)  # [B*H*W, H*W*N]
+    return torch.min(dist, dim=1).values.reshape(B, H, W)  # [B, H, W]
 
 
 def raw_map_same_row(patch, patch_lib, neighbor_radius=0):
-    # patch: [1, C, H, W] -> patch_hwc: [H, W, C]
-    # patch_lib: [H, W, N, C]
-    # same_row 模式：第 h 行的每个 query patch 只和同一行或邻近行的 memory bank 匹配。
-    patch_hwc = _patch_to_hwc(patch)
+    # patch: [B, C, H, W] -> patch_hwbc: [H, W, B, C]
+    # same_row 模式先把每一行的 W 个位置和 B 张图合并成 query: [H, W*B, C]。
+    patch_hwbc = _patch_to_hwbc(patch)
     H, W, N, C = patch_lib.shape
+    B = patch_hwbc.shape[2]
+    query = patch_hwbc.reshape(H, W * B, C)  # [H, W*B, C]
     row_lib = patch_lib.reshape(H, W * N, C)  # [H, W*N, C]
     r = int(neighbor_radius)
     if r == 0:
-        # patch_hwc: [H, W, C], row_lib: [H, W*N, C]
-        # cdist 按 batch 维 H 分行计算，输出 [H, W, W*N]。
-        dist = torch.cdist(patch_hwc, row_lib)
-        return torch.min(dist, dim=2).values  # [H, W]
+        dist = torch.cdist(query, row_lib)  # [H, W*B, W*N]
+        raw_h_wb = torch.min(dist, dim=2).values  # [H, W*B]
+        return raw_h_wb.reshape(H, W, B).permute(2, 0, 1)  # [B, H, W]
 
     K = 2 * r + 1
-    # row_lib.permute(1, 2, 0): [W*N, C, H]
-    # pad 行方向后恢复为 [H+2r, W*N, C]。
     lib_pad = torch.nn.functional.pad(
         row_lib.permute(1, 2, 0),
         (r, r),
         mode="replicate",
-    ).permute(2, 0, 1)
-    # unfold 行邻域：[H, W*N, C, K] -> [H, K, W*N, C]
+    ).permute(2, 0, 1)  # [H+2r, W*N, C]
     lib_pad = lib_pad.unfold(0, K, 1)
     lib_pad = lib_pad.permute(0, 3, 1, 2).contiguous()
     lib_pad = lib_pad.reshape(H, K * W * N, C)  # [H, K*W*N, C]
-    dist = torch.cdist(patch_hwc, lib_pad)  # [H, W, K*W*N]
-    return torch.min(dist, dim=2).values  # [H, W]
+    dist = torch.cdist(query, lib_pad)  # [H, W*B, K*W*N]
+    raw_h_wb = torch.min(dist, dim=2).values  # [H, W*B]
+    return raw_h_wb.reshape(H, W, B).permute(2, 0, 1)  # [B, H, W]
 
 
 def raw_map_exact_position(patch, patch_lib, neighbor_radius=0):
-    # patch: [1, C, H, W] -> patch_hwc: [H, W, C]
+    # patch: [B, C, H, W] -> patch_hwbc: [H, W, B, C]
     # patch_lib: [H, W, N, C]
-    # exact_position 模式：每个位置只和同位置 memory bank 匹配；r>0 时加入周围 K*K 个位置。
-    patch_hwc = _patch_to_hwc(patch)
+    # 先得到 raw_hwb: [H, W, B]，最后转成 raw_bhw: [B, H, W]。
+    patch_hwbc = _patch_to_hwbc(patch)
     H, W, N, C = patch_lib.shape
     r = int(neighbor_radius)
-    patch_query = patch_hwc.unsqueeze(2)  # [H, W, 1, C]
     if r == 0:
-        # patch_query: [H, W, 1, C], patch_lib: [H, W, N, C]
-        # 输出 [H, W, 1, N]，对 N 取最小后得到 [H, W]。
-        dist = torch.cdist(patch_query, patch_lib)
-        return torch.min(dist, dim=-1).values.reshape(H, W)
+        dist = torch.cdist(patch_hwbc, patch_lib)  # [H, W, B, N]
+        raw_hwb = torch.min(dist, dim=-1).values  # [H, W, B]
+        return raw_hwb.permute(2, 0, 1)  # [B, H, W]
 
     K = 2 * r + 1
-    # patch_lib.permute(2, 3, 0, 1): [N, C, H, W]
-    # pad 空间维后恢复为 [H+2r, W+2r, N, C]。
     lib_pad = torch.nn.functional.pad(
         patch_lib.permute(2, 3, 0, 1),
         (r, r, r, r),
         mode="replicate",
-    ).permute(2, 3, 0, 1)
-    # unfold 取每个位置周围 K*K 邻域：
-    # [H, W, N, C, K, K] -> [H, W, K, K, N, C] -> [H, W, K*K*N, C]
+    ).permute(2, 3, 0, 1)  # [H+2r, W+2r, N, C]
     lib_pad = lib_pad.unfold(0, K, 1).unfold(1, K, 1)
     lib_pad = lib_pad.permute(0, 1, 4, 5, 2, 3).contiguous()
-    lib_pad = lib_pad.reshape(H, W, K * K * N, C)
-    dist = torch.cdist(patch_query, lib_pad)  # [H, W, 1, K*K*N]
-    return torch.min(dist, dim=-1).values.reshape(H, W)
+    lib_pad = lib_pad.reshape(H, W, K * K * N, C)  # [H, W, K*K*N, C]
+    dist = torch.cdist(patch_hwbc, lib_pad)  # [H, W, B, K*K*N]
+    raw_hwb = torch.min(dist, dim=-1).values  # [H, W, B]
+    return raw_hwb.permute(2, 0, 1)  # [B, H, W]
 
 
 def select_score_map(raw_map, stats, match_mode):
@@ -294,29 +286,32 @@ class PatchCorePredictor:
         return self
 
     def extract_patch(self, sample):
-        # sample: [1, 3, image_h, image_w]
+        # sample: [B, 3, image_h, image_w]
         with torch.no_grad():
             feature_maps = self.feature_extractor(sample.to(self.device))
         if self.resize is None:
             self.fmap_size = list(feature_maps[0].shape[-2:])
             self.resize = torch.nn.AdaptiveAvgPool2d(self.fmap_size)
-        # feature_maps: 多层特征 [1, C_i, H_i, W_i]
-        # average 后 resize 到同一个 [H, W]，再按通道拼接成 patch: [1, C_total, H, W]。
+        # feature_maps: 多层特征 [B, C_i, H_i, W_i]
+        # average 后 resize 到同一个 [H, W]，再按通道拼接成 patch: [B, C_total, H, W]。
         resized_maps = [self.resize(self.average(fmap)) for fmap in feature_maps]
         return torch.cat(resized_maps, 1)
 
-    def predict_tensor(self, sample):
-        patch = self.extract_patch(sample)  # [1, C, H, W]
-        raw_map = raw_map_by_mode(
+    def predict_batch_tensor(self, batch):
+        patch = self.extract_patch(batch)  # [B, C, H, W]
+        raw_maps = raw_map_by_mode(
             patch,
             self.patch_lib,
             match_mode=self.match_mode,
             neighbor_radius=self.neighbor_radius,
-        )
-        # raw_map / score_map: [H, W]，score 是整张图的最大异常分数。
-        score_map = select_score_map(raw_map, self.score_stats, self.match_mode)
-        score = torch.max(score_map).detach().cpu()
-        return score, score_map
+        )  # [B, H, W]
+        score_maps = select_score_map(raw_maps, self.score_stats, self.match_mode)
+        scores = score_maps.amax(dim=(1, 2)).detach().cpu()
+        return scores, score_maps
+
+    def predict_tensor(self, sample):
+        scores, score_maps = self.predict_batch_tensor(sample)
+        return scores[0], score_maps[0]
 
     def preprocess_image(self, image_path):
         image = Image.open(image_path).convert("RGB")
@@ -345,10 +340,12 @@ class PatchCorePredictor:
             hori_gap=hori_gap,
             vert_gap=vert_gap,
         )
+        tile_samples = [self.transform(tile.image).unsqueeze(0) for tile in tiles]
+        batch = torch.cat(tile_samples, dim=0)  # [B, 3, image_h, image_w]
+        scores, score_maps = self.predict_batch_tensor(batch)
+
         tile_rows = []
-        for tile in tiles:
-            sample = self.transform(tile.image).unsqueeze(0)
-            score, score_map = self.predict_tensor(sample)
+        for tile, score, score_map in zip(tiles, scores, score_maps):
             score_value = float(score.item())
             stitch_tile_score(full_score, score_map, tile.box)
             tile_rows.append({
