@@ -141,6 +141,15 @@ def normalize_vis_map(score_map):
     return (values.numpy() * 255).astype(np.uint8)
 
 
+def normalize_vis_array(values):
+    values = values.astype(np.float32, copy=False)
+    values = values - values.min()
+    max_value = values.max()
+    if max_value > 0:
+        values = values / max_value
+    return (values * 255).astype(np.uint8)
+
+
 def split_big_image_by_geometry(image, rows, cols, top_margin, bottom_margin, left_margin, right_margin, hori_gap, vert_gap):
     width, height = image.size
     available_width = width - left_margin - right_margin - (cols - 1) * hori_gap
@@ -373,7 +382,7 @@ def stitch_tile_score(full_score, tile_score_map, box):
     full_score[y1:y2, x1:x2] = tile_score
 
 
-def save_heatmap_outputs(image, score_map, image_path, output_dir, label, score, elapsed_ms):
+def save_heatmap_outputs(image, score_map, image_path, output_dir, label, score, elapsed_ms, vis_scale=1.0):
     output_dir = Path(output_dir)
     heatmap_dir = output_dir / "heatmaps"
     heatmap_dir.mkdir(parents=True, exist_ok=True)
@@ -383,11 +392,17 @@ def save_heatmap_outputs(image, score_map, image_path, output_dir, label, score,
     elapsed_text = f"{elapsed_ms:.0f}ms"
     out_name = f"{classname}_{stem}_{score_text}_{elapsed_text}.jpg"
 
-    # score_map: [H, W]，先归一化成 0-255，再 resize 回原图尺寸做可视化。
-    heat = normalize_vis_map(score_map)
-    heat = cv2.resize(heat, image.size)
+    # score_map: [H, W]。先按 vis_scale 缩放 score_map，再归一化到 0-255。
+    # 这样在大图模式下不必先处理完整 5096x5096 的 full_score，可明显降低可视化耗时。
+    vis_scale = float(vis_scale)
+    if vis_scale <= 0:
+        raise ValueError(f"vis_scale must be > 0, got {vis_scale}")
+    vis_size = (max(1, int(image.width * vis_scale)), max(1, int(image.height * vis_scale)))
+    score_array = score_map.detach().cpu().float().numpy() if torch.is_tensor(score_map) else np.asarray(score_map, dtype=np.float32)
+    score_array = cv2.resize(score_array, vis_size)
+    heat = normalize_vis_array(score_array)
     heat_color = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
-    image_bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+    image_bgr = cv2.resize(cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR), vis_size)
     overlay = cv2.addWeighted(heat_color, 0.5, image_bgr, 0.5, 0)
     combined = cv2.hconcat([image_bgr, overlay])
     combined_path = heatmap_dir / out_name
@@ -456,7 +471,8 @@ def write_metrics_json(path, rows):
 @click.option("--right-margin", default=3, type=int)
 @click.option("--hori-gap", default=1, type=int)
 @click.option("--vert-gap", default=1, type=int)
-def cli_interface(model_path, image, input_path, output_dir, backbone, image_size, fmap_size, resize_method, out_indices, match_mode, neighbor_radius, device, big_image, rows, cols, top_margin, bottom_margin, left_margin, right_margin, hori_gap, vert_gap):
+@click.option("--vis-scale", default=1.0, type=float)
+def cli_interface(model_path, image, input_path, output_dir, backbone, image_size, fmap_size, resize_method, out_indices, match_mode, neighbor_radius, device, big_image, rows, cols, top_margin, bottom_margin, left_margin, right_margin, hori_gap, vert_gap, vis_scale):
     if image is None and input_path is None:
         raise click.UsageError("Provide --image or --input")
     try:
@@ -505,7 +521,7 @@ def cli_interface(model_path, image, input_path, output_dir, backbone, image_siz
         else:
             src_image, score, score_map, elapsed_ms = predictor.predict_image(image_path)
         label = infer_label_from_path(image_path)
-        result_path = save_heatmap_outputs(src_image, score_map, image_path, output_dir, label, score, elapsed_ms)
+        result_path = save_heatmap_outputs(src_image, score_map, image_path, output_dir, label, score, elapsed_ms, vis_scale=vis_scale)
         score_rows.append({
             "path": str(image_path),
             "label": label,
