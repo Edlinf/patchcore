@@ -487,7 +487,8 @@ def write_metrics_json(path, rows):
 @click.option("--hori-gap", default=1, type=int)
 @click.option("--vert-gap", default=1, type=int)
 @click.option("--vis-scale", default=0.25, type=float)
-def cli_interface(model_path, image, input_path, output_dir, backbone, image_size, fmap_size, resize_method, out_indices, match_mode, neighbor_radius, start_pos, end_pos, device, big_image, rows, cols, top_margin, bottom_margin, left_margin, right_margin, hori_gap, vert_gap, vis_scale):
+@click.option("--visual", is_flag=True, help="Save visualization images. Disabled by default for faster inference.")
+def cli_interface(model_path, image, input_path, output_dir, backbone, image_size, fmap_size, resize_method, out_indices, match_mode, neighbor_radius, start_pos, end_pos, device, big_image, rows, cols, top_margin, bottom_margin, left_margin, right_margin, hori_gap, vert_gap, vis_scale, visual):
     if image is None and input_path is None:
         raise click.UsageError("Provide --image or --input")
     if big_image and (start_pos != 0 or end_pos != 0):
@@ -540,7 +541,9 @@ def cli_interface(model_path, image, input_path, output_dir, backbone, image_siz
         else:
             src_image, score, score_map, elapsed_ms = predictor.predict_image(image_path)
         label = infer_label_from_path(image_path)
-        result_path = save_heatmap_outputs(src_image, score_map, image_path, output_dir, label, score, elapsed_ms, vis_scale=vis_scale)
+        result_path = ""
+        if visual:
+            result_path = save_heatmap_outputs(src_image, score_map, image_path, output_dir, label, score, elapsed_ms, vis_scale=vis_scale)
         score_rows.append({
             "path": str(image_path),
             "label": label,
