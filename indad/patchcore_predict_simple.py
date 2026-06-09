@@ -260,7 +260,7 @@ def raw_map_by_mode(patch, patch_lib, match_mode, neighbor_radius):
 
 
 class PatchCorePredictor:
-    def __init__(self, model_path, backbone="resnet18", out_indices=(2, 3), image_size=(224, 224), fmap_size=None, resize_method="cv2", match_mode="exact_position", neighbor_radius=0, device="auto", output_dir="./results-predict-simple"):
+    def __init__(self, model_path, backbone="resnet18", out_indices=(2, 3), image_size=(224, 224), fmap_size=None, resize_method="cv2", match_mode="exact_position", neighbor_radius=0, start_pos=0, end_pos=0, device="auto", output_dir="./results-predict-simple"):
         self.model_path = Path(model_path)
         self.backbone = backbone
         self.out_indices = tuple(out_indices)
@@ -269,6 +269,8 @@ class PatchCorePredictor:
         self.resize_method = resize_method
         self.match_mode = match_mode
         self.neighbor_radius = int(neighbor_radius)
+        self.start_pos = int(start_pos)
+        self.end_pos = int(end_pos)
         self.output_dir = Path(output_dir)
         if device == "auto":
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -297,6 +299,16 @@ class PatchCorePredictor:
             self.resize = torch.nn.AdaptiveAvgPool2d(self.fmap_size)
         return self
 
+    def crop_patch_width(self, patch):
+        if self.start_pos != 0 or self.end_pos != 0:
+            return patch[:, :, :, int(self.start_pos / 8):int(self.end_pos / 8)]
+        return patch
+
+    def crop_source_image(self, image):
+        if self.start_pos != 0 or self.end_pos != 0:
+            return image.crop((self.start_pos, 0, self.end_pos, image.height))
+        return image
+
     def extract_patch(self, sample):
         # sample: [B, 3, image_h, image_w]
         with torch.no_grad():
@@ -307,7 +319,8 @@ class PatchCorePredictor:
         # feature_maps: 多层特征 [B, C_i, H_i, W_i]
         # average 后 resize 到同一个 [H, W]，再按通道拼接成 patch: [B, C_total, H, W]。
         resized_maps = [self.resize(self.average(fmap)) for fmap in feature_maps]
-        return torch.cat(resized_maps, 1)
+        patch = torch.cat(resized_maps, 1)
+        return self.crop_patch_width(patch)
 
     def predict_batch_tensor(self, batch):
         patch = self.extract_patch(batch)  # [B, C, H, W]
@@ -335,7 +348,7 @@ class PatchCorePredictor:
         image, sample = self.preprocess_image(image_path)
         score, score_map = self.predict_tensor(sample)
         elapsed_ms = (time.time() - start) * 1000
-        return image, float(score.item()), score_map, elapsed_ms
+        return self.crop_source_image(image), float(score.item()), score_map, elapsed_ms
 
     def predict_big_image(self, image_path, rows, cols, top_margin, bottom_margin, left_margin, right_margin, hori_gap, vert_gap):
         start = time.time()
@@ -461,6 +474,8 @@ def write_metrics_json(path, rows):
 @click.option("--out-indices", default="2,3")
 @click.option("--match-mode", default="exact_position", type=click.Choice(["global", "same_row", "exact_position"]))
 @click.option("--neighbor-radius", default=0, type=int)
+@click.option("--start-pos", default=0, type=int)
+@click.option("--end-pos", default=0, type=int)
 @click.option("--device", default="auto", type=click.Choice(["auto", "cuda", "cpu"]))
 @click.option("--big-image", is_flag=True)
 @click.option("--rows", default=5, type=int)
@@ -471,10 +486,12 @@ def write_metrics_json(path, rows):
 @click.option("--right-margin", default=3, type=int)
 @click.option("--hori-gap", default=1, type=int)
 @click.option("--vert-gap", default=1, type=int)
-@click.option("--vis-scale", default=1.0, type=float)
-def cli_interface(model_path, image, input_path, output_dir, backbone, image_size, fmap_size, resize_method, out_indices, match_mode, neighbor_radius, device, big_image, rows, cols, top_margin, bottom_margin, left_margin, right_margin, hori_gap, vert_gap, vis_scale):
+@click.option("--vis-scale", default=0.25, type=float)
+def cli_interface(model_path, image, input_path, output_dir, backbone, image_size, fmap_size, resize_method, out_indices, match_mode, neighbor_radius, start_pos, end_pos, device, big_image, rows, cols, top_margin, bottom_margin, left_margin, right_margin, hori_gap, vert_gap, vis_scale):
     if image is None and input_path is None:
         raise click.UsageError("Provide --image or --input")
+    if big_image and (start_pos != 0 or end_pos != 0):
+        raise click.UsageError("--start-pos/--end-pos are not supported with --big-image")
     try:
         info = parse_model_info_simple(model_path)
     except ValueError:
@@ -494,6 +511,8 @@ def cli_interface(model_path, image, input_path, output_dir, backbone, image_siz
         resize_method=resize_method,
         match_mode=match_mode,
         neighbor_radius=neighbor_radius,
+        start_pos=start_pos,
+        end_pos=end_pos,
         device=device,
         output_dir=output_dir,
     ).load()

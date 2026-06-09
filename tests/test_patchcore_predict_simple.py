@@ -117,6 +117,23 @@ def test_predictor_device_can_be_forced_to_cpu():
     assert predictor.device.type == "cpu"
 
 
+def test_predictor_crop_patch_width_by_start_end():
+    predictor = PatchCorePredictor("dummy.ts", start_pos=16, end_pos=32)
+    patch = torch.zeros(1, 4, 2, 8)
+    cropped = predictor.crop_patch_width(patch)
+
+    assert cropped.shape == torch.Size([1, 4, 2, 2])
+
+
+def test_predictor_crop_source_image_for_visualization():
+    predictor = PatchCorePredictor("dummy.ts", start_pos=2, end_pos=5)
+    image = Image.fromarray(np.zeros((4, 8, 3), dtype=np.uint8), "RGB")
+
+    cropped = predictor.crop_source_image(image)
+
+    assert cropped.size == (3, 4)
+
+
 def test_raw_map_global_matches_any_position():
     patch = torch.tensor([[[[0.0, 10.0]]]])
     patch_lib = torch.tensor([[[[5.0]], [[10.0]]]])
