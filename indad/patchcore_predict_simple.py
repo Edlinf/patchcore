@@ -12,6 +12,7 @@ import torch
 from PIL import Image
 from torchvision import transforms
 import timm
+import onnxruntime as ort
 from sklearn.metrics import roc_auc_score
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -260,7 +261,7 @@ def raw_map_by_mode(patch, patch_lib, match_mode, neighbor_radius):
 
 
 class PatchCorePredictor:
-    def __init__(self, model_path, backbone="resnet18", out_indices=(2, 3), image_size=(224, 224), fmap_size=None, resize_method="cv2", match_mode="exact_position", neighbor_radius=0, start_pos=0, end_pos=0, device="auto", output_dir="./results-predict-simple"):
+    def __init__(self, model_path, backbone="resnet18", out_indices=(2, 3), image_size=(224, 224), fmap_size=None, resize_method="cv2", match_mode="exact_position", neighbor_radius=0, start_pos=0, end_pos=0, device="auto", feature_backend="torch", feature_model=None, output_dir="./results-predict-simple"):
         self.model_path = Path(model_path)
         self.backbone = backbone
         self.out_indices = tuple(out_indices)
@@ -271,6 +272,8 @@ class PatchCorePredictor:
         self.neighbor_radius = int(neighbor_radius)
         self.start_pos = int(start_pos)
         self.end_pos = int(end_pos)
+        self.feature_backend = feature_backend
+        self.feature_model = Path(feature_model) if feature_model else None
         self.output_dir = Path(output_dir)
         if device == "auto":
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -286,13 +289,20 @@ class PatchCorePredictor:
     def load(self):
         project_root = Path(__file__).resolve().parents[1]
         torch.hub.set_dir(str(project_root / "hub"))
-        self.feature_extractor = timm.create_model(
-            self.backbone,
-            out_indices=self.out_indices,
-            features_only=True,
-            pretrained=True,
-        )
-        self.feature_extractor.eval().to(self.device)
+        if self.feature_backend == "onnx":
+            if self.feature_model is None:
+                raise ValueError("--feature-model is required when --feature-backend=onnx")
+            self.feature_extractor = ort.InferenceSession(str(self.feature_model), providers=["CPUExecutionProvider"])
+        elif self.feature_backend == "torch":
+            self.feature_extractor = timm.create_model(
+                self.backbone,
+                out_indices=self.out_indices,
+                features_only=True,
+                pretrained=True,
+            )
+            self.feature_extractor.eval().to(self.device)
+        else:
+            raise ValueError(f"unsupported feature_backend: {self.feature_backend}")
         self.patch_lib, self.score_stats = load_patchcore_archive_simple(self.model_path)
         self.patch_lib = self.patch_lib.to(self.device)
         if self.fmap_size is not None:
@@ -311,8 +321,13 @@ class PatchCorePredictor:
 
     def extract_patch(self, sample):
         # sample: [B, 3, image_h, image_w]
-        with torch.no_grad():
-            feature_maps = self.feature_extractor(sample.to(self.device))
+        if self.feature_backend == "onnx":
+            input_name = self.feature_extractor.get_inputs()[0].name
+            outputs = self.feature_extractor.run(None, {input_name: sample.cpu().numpy()})
+            feature_maps = [torch.from_numpy(output).to(self.device) for output in outputs]
+        else:
+            with torch.no_grad():
+                feature_maps = self.feature_extractor(sample.to(self.device))
         if self.resize is None:
             self.fmap_size = list(feature_maps[0].shape[-2:])
             self.resize = torch.nn.AdaptiveAvgPool2d(self.fmap_size)
@@ -477,6 +492,8 @@ def write_metrics_json(path, rows):
 @click.option("--start-pos", default=0, type=int)
 @click.option("--end-pos", default=0, type=int)
 @click.option("--device", default="auto", type=click.Choice(["auto", "cuda", "cpu"]))
+@click.option("--feature-backend", default="torch", type=click.Choice(["torch", "onnx"]))
+@click.option("--feature-model", type=Path, default=None)
 @click.option("--big-image", is_flag=True)
 @click.option("--rows", default=5, type=int)
 @click.option("--cols", default=3, type=int)
@@ -488,7 +505,7 @@ def write_metrics_json(path, rows):
 @click.option("--vert-gap", default=1, type=int)
 @click.option("--vis-scale", default=0.25, type=float)
 @click.option("--visual", is_flag=True, help="Save visualization images. Disabled by default for faster inference.")
-def cli_interface(model_path, image, input_path, output_dir, backbone, image_size, fmap_size, resize_method, out_indices, match_mode, neighbor_radius, start_pos, end_pos, device, big_image, rows, cols, top_margin, bottom_margin, left_margin, right_margin, hori_gap, vert_gap, vis_scale, visual):
+def cli_interface(model_path, image, input_path, output_dir, backbone, image_size, fmap_size, resize_method, out_indices, match_mode, neighbor_radius, start_pos, end_pos, device, feature_backend, feature_model, big_image, rows, cols, top_margin, bottom_margin, left_margin, right_margin, hori_gap, vert_gap, vis_scale, visual):
     if image is None and input_path is None:
         raise click.UsageError("Provide --image or --input")
     if big_image and (start_pos != 0 or end_pos != 0):
@@ -515,6 +532,8 @@ def cli_interface(model_path, image, input_path, output_dir, backbone, image_siz
         start_pos=start_pos,
         end_pos=end_pos,
         device=device,
+        feature_backend=feature_backend,
+        feature_model=feature_model,
         output_dir=output_dir,
     ).load()
 
