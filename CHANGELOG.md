@@ -6,7 +6,6 @@
 - standalone predictor 新增 `--start-pos` / `--end-pos` 参数，普通小图推理时在 feature patch 宽度维按 `start_pos/8:end_pos/8` 裁剪，并同步裁剪可视化原图区域；大图模式暂不支持该参数组合。
 - standalone predictor 新增 `--vis-scale` 可视化缩放参数，并将可视化流程改为先缩小 score map 再归一化，降低大图热力图生成耗时。
 - standalone predictor 新增 `--visual` 开关；默认不保存可视化图片，仅输出 `scores.csv`、`metrics.json` 和大图模式下的 `tile_scores.csv`，需要查看图像时显式传入 `--visual`。
-- 大图推理性能验证显示，`384x128` 模型在 CPU/GPU 下均可稳定运行；GPU 下模型计算已不是主要瓶颈，读图和大图可视化占主要耗时。
 
 ## v5.1
 
