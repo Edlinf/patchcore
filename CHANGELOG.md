@@ -1,5 +1,11 @@
 # 更新日志
 
+## v5.3
+
+- 新增 `indad/export_patchcore_backbone_onnx.py`，可将 PatchCore 使用的 `timm` backbone 特征提取器导出为 ONNX，默认支持 `resnet18`、`out_indices=2,3`、动态 batch 维。
+- standalone predictor 新增 `--feature-backend torch|onnx` 和 `--feature-model` 参数，支持使用 ONNX Runtime CPU 执行 backbone 特征提取，后续 PatchCore 最近邻和大图拼接逻辑保持不变。
+- CPU 连续大图推理对比显示，ONNX backend 在不保存可视化时将平均耗时从约 `747ms/张` 降到约 `603ms/张`，特征提取阶段从约 `369ms` 降到约 `221ms`。
+
 ## v5.2
 
 - standalone predictor 新增 `--device auto|cuda|cpu` 参数，可显式选择 CPU 或 GPU 推理。
