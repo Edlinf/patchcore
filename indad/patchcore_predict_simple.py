@@ -179,32 +179,30 @@ def _patch_to_hwbc(patch):
     return patch.permute(2, 3, 0, 1)
 
 
-def raw_map_global(patch, patch_lib):
+def build_global_lib_pad(patch_lib):
+    # global 模式与位置/图像无关，lib 直接展平成 [H*W*N, C]，可在 load() 时预计算一次后复用。
+    return patch_lib.reshape(-1, patch_lib.shape[-1]).contiguous()  # [H*W*N, C]
+
+
+def raw_map_global(patch, patch_lib, lib_pad=None):
     # patch: [B, C, H, W]
     # patch_lib: [H, W, N, C]
     # global 模式不关心空间位置，query 直接展开成 [B*H*W, C]。
     B, C, H, W = patch.shape
     query = patch.permute(0, 2, 3, 1).reshape(B * H * W, C)  # [B*H*W, C]
-    lib = patch_lib.reshape(-1, patch_lib.shape[-1])  # [H*W*N, C]
+    lib = lib_pad if lib_pad is not None else build_global_lib_pad(patch_lib)  # [H*W*N, C]
     dist = torch.cdist(query, lib)  # [B*H*W, H*W*N]
     return torch.min(dist, dim=1).values.reshape(B, H, W)  # [B, H, W]
 
 
-def raw_map_same_row(patch, patch_lib, neighbor_radius=0):
-    # patch: [B, C, H, W] -> patch_hwbc: [H, W, B, C]
-    # same_row 模式先把每一行的 W 个位置和 B 张图合并成 query: [H, W*B, C]。
-    patch_hwbc = _patch_to_hwbc(patch)
+def build_same_row_lib_pad(patch_lib, neighbor_radius):
+    # 与图像无关，只依赖 patch_lib 和 r，可在 load() 时预计算一次后复用。
     H, W, N, C = patch_lib.shape
-    B = patch_hwbc.shape[2]
-    query = patch_hwbc.reshape(H, W * B, C)  # [H, W*B, C]
-    row_lib = patch_lib.reshape(H, W * N, C)  # [H, W*N, C]
     r = int(neighbor_radius)
     if r == 0:
-        dist = torch.cdist(query, row_lib)  # [H, W*B, W*N]
-        raw_h_wb = torch.min(dist, dim=2).values  # [H, W*B]
-        return raw_h_wb.reshape(H, W, B).permute(2, 0, 1)  # [B, H, W]
-
+        return patch_lib.reshape(H, W * N, C).contiguous()  # [H, W*N, C]
     K = 2 * r + 1
+    row_lib = patch_lib.reshape(H, W * N, C)  # [H, W*N, C]
     lib_pad = torch.nn.functional.pad(
         row_lib.permute(1, 2, 0),
         (r, r),
@@ -212,24 +210,30 @@ def raw_map_same_row(patch, patch_lib, neighbor_radius=0):
     ).permute(2, 0, 1)  # [H+2r, W*N, C]
     lib_pad = lib_pad.unfold(0, K, 1)
     lib_pad = lib_pad.permute(0, 3, 1, 2).contiguous()
-    lib_pad = lib_pad.reshape(H, K * W * N, C)  # [H, K*W*N, C]
-    dist = torch.cdist(query, lib_pad)  # [H, W*B, K*W*N]
+    return lib_pad.reshape(H, K * W * N, C)  # [H, K*W*N, C]
+
+
+def raw_map_same_row(patch, patch_lib, neighbor_radius=0, lib_pad=None):
+    # patch: [B, C, H, W] -> patch_hwbc: [H, W, B, C]
+    # same_row 模式先把每一行的 W 个位置和 B 张图合并成 query: [H, W*B, C]。
+    patch_hwbc = _patch_to_hwbc(patch)
+    H, W, _, C = patch_lib.shape
+    B = patch_hwbc.shape[2]
+    query = patch_hwbc.reshape(H, W * B, C)  # [H, W*B, C]
+    r = int(neighbor_radius)
+    if lib_pad is None:
+        lib_pad = build_same_row_lib_pad(patch_lib, r)  # r==0: [H, W*N, C]; r>0: [H, K*W*N, C]
+    dist = torch.cdist(query, lib_pad)  # [H, W*B, (K*)W*N]
     raw_h_wb = torch.min(dist, dim=2).values  # [H, W*B]
     return raw_h_wb.reshape(H, W, B).permute(2, 0, 1)  # [B, H, W]
 
 
-def raw_map_exact_position(patch, patch_lib, neighbor_radius=0):
-    # patch: [B, C, H, W] -> patch_hwbc: [H, W, B, C]
-    # patch_lib: [H, W, N, C]
-    # 先得到 raw_hwb: [H, W, B]，最后转成 raw_bhw: [B, H, W]。
-    patch_hwbc = _patch_to_hwbc(patch)
-    H, W, N, C = patch_lib.shape
+def build_exact_position_lib_pad(patch_lib, neighbor_radius):
+    # 与图像无关，只依赖 patch_lib 和 r，可在 load() 时预计算一次后复用。
     r = int(neighbor_radius)
     if r == 0:
-        dist = torch.cdist(patch_hwbc, patch_lib)  # [H, W, B, N]
-        raw_hwb = torch.min(dist, dim=-1).values  # [H, W, B]
-        return raw_hwb.permute(2, 0, 1)  # [B, H, W]
-
+        return patch_lib.contiguous()  # [H, W, N, C]
+    H, W, N, C = patch_lib.shape
     K = 2 * r + 1
     lib_pad = torch.nn.functional.pad(
         patch_lib.permute(2, 3, 0, 1),
@@ -238,8 +242,18 @@ def raw_map_exact_position(patch, patch_lib, neighbor_radius=0):
     ).permute(2, 3, 0, 1)  # [H+2r, W+2r, N, C]
     lib_pad = lib_pad.unfold(0, K, 1).unfold(1, K, 1)
     lib_pad = lib_pad.permute(0, 1, 4, 5, 2, 3).contiguous()
-    lib_pad = lib_pad.reshape(H, W, K * K * N, C)  # [H, W, K*K*N, C]
-    dist = torch.cdist(patch_hwbc, lib_pad)  # [H, W, B, K*K*N]
+    return lib_pad.reshape(H, W, K * K * N, C)  # [H, W, K*K*N, C]
+
+
+def raw_map_exact_position(patch, patch_lib, neighbor_radius=0, lib_pad=None):
+    # patch: [B, C, H, W] -> patch_hwbc: [H, W, B, C]
+    # patch_lib: [H, W, N, C]
+    # 先得到 raw_hwb: [H, W, B]，最后转成 raw_bhw: [B, H, W]。
+    patch_hwbc = _patch_to_hwbc(patch)
+    r = int(neighbor_radius)
+    if lib_pad is None:
+        lib_pad = build_exact_position_lib_pad(patch_lib, r)  # r==0: [H, W, N, C]; r>0: [H, W, K*K*N, C]
+    dist = torch.cdist(patch_hwbc, lib_pad)  # [H, W, B, (K*K*)N]
     raw_hwb = torch.min(dist, dim=-1).values  # [H, W, B]
     return raw_hwb.permute(2, 0, 1)  # [B, H, W]
 
@@ -250,13 +264,13 @@ def select_score_map(raw_map, stats, match_mode):
     return raw_map
 
 
-def raw_map_by_mode(patch, patch_lib, match_mode, neighbor_radius):
+def raw_map_by_mode(patch, patch_lib, match_mode, neighbor_radius, lib_pad=None):
     if match_mode == "global":
-        return raw_map_global(patch, patch_lib)
+        return raw_map_global(patch, patch_lib, lib_pad=lib_pad)
     if match_mode == "same_row":
-        return raw_map_same_row(patch, patch_lib, neighbor_radius=neighbor_radius)
+        return raw_map_same_row(patch, patch_lib, neighbor_radius=neighbor_radius, lib_pad=lib_pad)
     if match_mode == "exact_position":
-        return raw_map_exact_position(patch, patch_lib, neighbor_radius=neighbor_radius)
+        return raw_map_exact_position(patch, patch_lib, neighbor_radius=neighbor_radius, lib_pad=lib_pad)
     raise ValueError(f"unsupported match_mode: {match_mode}")
 
 
@@ -283,6 +297,7 @@ class PatchCorePredictor:
         self.resize = None
         self.feature_extractor = None
         self.patch_lib = None
+        self.lib_pad = None
         self.score_stats = None
         self.transform = build_transform(self.image_size, self.resize_method)
 
@@ -307,6 +322,14 @@ class PatchCorePredictor:
         self.patch_lib = self.patch_lib.to(self.device)
         if self.fmap_size is not None:
             self.resize = torch.nn.AdaptiveAvgPool2d(self.fmap_size)
+        # lib_pad 与图像无关，只依赖 patch_lib / match_mode / neighbor_radius，预计算一次后每张图复用，
+        # 避免在 raw_map_* 里对每张图重复 reshape/pad/unfold/contiguous 出临时张量（r>0 时是 ~K*K 倍）。
+        if self.match_mode == "exact_position":
+            self.lib_pad = build_exact_position_lib_pad(self.patch_lib, self.neighbor_radius)
+        elif self.match_mode == "same_row":
+            self.lib_pad = build_same_row_lib_pad(self.patch_lib, self.neighbor_radius)
+        elif self.match_mode == "global":
+            self.lib_pad = build_global_lib_pad(self.patch_lib)
         return self
 
     def crop_patch_width(self, patch):
@@ -344,6 +367,7 @@ class PatchCorePredictor:
             self.patch_lib,
             match_mode=self.match_mode,
             neighbor_radius=self.neighbor_radius,
+            lib_pad=self.lib_pad,
         )  # [B, H, W]
         score_maps = select_score_map(raw_maps, self.score_stats, self.match_mode)
         scores = score_maps.amax(dim=(1, 2)).detach().cpu()
@@ -432,7 +456,7 @@ def save_heatmap_outputs(image, score_map, image_path, output_dir, label, score,
     heat_color = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
     image_bgr = cv2.resize(cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR), vis_size)
     overlay = cv2.addWeighted(heat_color, 0.5, image_bgr, 0.5, 0)
-    combined = cv2.hconcat([image_bgr, overlay])
+    combined = cv2.vconcat([image_bgr, overlay])
     combined_path = heatmap_dir / out_name
     cv2.imwrite(str(combined_path), combined)
     return combined_path

@@ -1,5 +1,11 @@
 # 更新日志
 
+## v5.4
+
+- standalone predictor 将各匹配模式中「与图像无关」的特征库张量构造抽离为独立函数 `build_global_lib_pad`、`build_same_row_lib_pad`、`build_exact_position_lib_pad`，并在 `PatchCorePredictor.load()` 阶段按 `match_mode` 和 `neighbor_radius` 预计算一次缓存到 `self.lib_pad`，每张图推理时复用。
+- `raw_map_global`、`raw_map_same_row`、`raw_map_exact_position` 和 `raw_map_by_mode` 新增可选 `lib_pad` 参数，传入预缓存张量则直接复用，未传入时按原逻辑现场构造，保持向后兼容；推理结果与原实现完全一致。
+- 该优化消除了 `neighbor_radius > 0` 时每张图重复执行 `pad/unfold/contiguous` 构造 `~K*K` 倍大小邻域候选张量的开销：在 `1536x128`、`exact_position`、`neighbor_radius=1` 下，GPU 平均耗时从约 `122ms/张` 降到约 `58ms/张`，CPU ONNX 从约 `2327ms/张` 降到约 `1010ms/张`；显存/内存峰值不变（缓存张量改为常驻而非每图重建）。
+
 ## v5.3
 
 - 新增 `indad/export_patchcore_backbone_onnx.py`，可将 PatchCore 使用的 `timm` backbone 特征提取器导出为 ONNX，默认支持 `resnet18`、`out_indices=2,3`、动态 batch 维。
