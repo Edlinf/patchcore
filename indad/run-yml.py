@@ -39,9 +39,10 @@ DEFAULT_FEATURE_INDICES = {
     "patchcore":"2,3",
 }
 
-def run_model(jobini, method: str, backbone: str, resize_method:str,out_indices: tuple, cls: str, dataset_dir: str,results_dir: str,image_size: int, f_coreset: float,coreset_eps: float, max_feature_count: int=0, start_pos: int=0, end_pos: int=0, score_normalization=None):
+def run_model(jobini, method: str, backbone: str, resize_method:str,out_indices: tuple, cls: str, dataset_dir: str,results_dir: str,image_size: int, f_coreset: float,coreset_eps: float, max_feature_count: int=0, start_pos: int=0, end_pos: int=0, score_normalization=None, gauge=None):
     results = {}
     score_normalization = score_normalization or {}
+    gauge = gauge or {}
     if method == "spade":
         backbone_name = backbone if len(backbone) > 0 else "wide_resnet50_2" 
         model = SPADE(
@@ -85,6 +86,11 @@ def run_model(jobini, method: str, backbone: str, resize_method:str,out_indices:
             score_normalization_smooth_kernel=score_normalization.get('smooth_kernel', 3),
             score_normalization_threshold_quantile=score_normalization.get('threshold_quantile', 0.999),
             score_normalization_clamp_min_zero=score_normalization.get('clamp_min_zero', True),
+            match_mode=gauge.get('match_mode', 'exact_position'),
+            gauge_enabled=gauge.get('enabled', False),
+            gauge_rank=gauge.get('rank', 8),
+            gauge_window=gauge.get('window', 3),
+            gauge_chunk_size=gauge.get('chunk_size', 256),
         )
     # model = model.to(device)
     print(f"\n█│ Running {method} on {cls} dataset.")
@@ -212,6 +218,7 @@ def cli_interface(cfg_tpl: str, cfg_path: str, output_dir: str, max_feature_coun
     f_coreset = cfg['f_coreset']        #fraction the number of training samples
     coreset_eps = 0.90                  #sparse projection parameter
     score_normalization = cfg.get('score_normalization', {})
+    gauge = cfg.get('gauge', {})
     feature_indices = "2,3"
     dataset_dir = cfg['dataset_dir']
     dataset = cfg['dataset']
@@ -263,7 +270,7 @@ def cli_interface(cfg_tpl: str, cfg_path: str, output_dir: str, max_feature_coun
         os.makedirs(result_dir)
 
     #运行模型
-    total_results, run_info = run_model(jobini,method, backbone, resize_method, out_indices, dataset, dataset_dir,result_dir,image_size, f_coreset,coreset_eps, max_feature_count, start_pos, end_pos, score_normalization)
+    total_results, run_info = run_model(jobini,method, backbone, resize_method, out_indices, dataset, dataset_dir,result_dir,image_size, f_coreset,coreset_eps, max_feature_count, start_pos, end_pos, score_normalization, gauge)
     
     #输出结果
     print_and_export_results(total_results, method, result_dir)

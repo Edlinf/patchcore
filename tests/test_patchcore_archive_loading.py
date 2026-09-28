@@ -127,3 +127,26 @@ def test_patchcore_normalize_score_map_returns_raw_for_same_row():
     result = PatchCore._normalize_score_map_if_available(model, raw_map)
 
     assert result is raw_map
+
+
+def test_gauge_archive_roundtrip_and_legacy_compatibility(tmp_path):
+    from gauge import fit_gauge_stats
+
+    patch_lib = torch.randn(4, 5, 3, 8)
+    stats = fit_gauge_stats(torch.rand(5, 3, 4), "exact_position")
+    stats.update(rank=4, window=3)
+    save_patchcore_archive(str(tmp_path), "gauge.ts", patch_lib, gauge_stats=stats)
+    loaded, patch_stats, gauge_stats = load_patchcore_archive(
+        str(tmp_path / "gauge.ts"), with_gauge=True
+    )
+    assert torch.allclose(loaded, patch_lib)
+    assert patch_stats is None
+    assert gauge_stats["mode"] == "exact_position"
+    assert gauge_stats["rank"] == 4
+    assert torch.allclose(gauge_stats["baseline"], stats["baseline"])
+
+    save_tensor(str(tmp_path), "legacy.ts", patch_lib)
+    _, _, legacy_gauge = load_patchcore_archive(
+        str(tmp_path / "legacy.ts"), with_gauge=True
+    )
+    assert legacy_gauge is None

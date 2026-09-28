@@ -5,6 +5,12 @@ feature_indices: [2,3]
 image_size: !var image_size
 f_coreset: 0.10
 coreset_eps: 0.90
+gauge:
+    enabled: false
+    match_mode: exact_position  # global | same_row | exact_position
+    rank: 8
+    window: 3
+    chunk_size: 256
 score_normalization:
     enabled: true
     min_train_patches: 4

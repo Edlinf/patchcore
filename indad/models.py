@@ -17,6 +17,8 @@ from patchcore_normalization import (
     apply_position_normalization,
     compute_position_score_stats,
 )
+from gauge import (GAUGE_MODES, fit_gauge_stats, gauge_stats_from_archive,
+                   loop_curvature, loops_to_nodes, normalize_gauge)
 from PIL import Image
 import os
 from data import IMAGENET_MEAN, IMAGENET_STD
@@ -53,7 +55,7 @@ def save_tensor(results_dir, filename, x):
     tensors.save(path)
 
 
-def save_patchcore_archive(results_dir, filename, patch_lib, stats=None):
+def save_patchcore_archive(results_dir, filename, patch_lib, stats=None, gauge_stats=None):
     path = os.path.join(results_dir, filename)
     m = Module()
     m.register_parameter("patch_lib", nn.Parameter(patch_lib.detach()))
@@ -64,11 +66,20 @@ def save_patchcore_archive(results_dir, filename, patch_lib, stats=None):
         threshold = stats["recommended_pixel_threshold"].detach().reshape(1)
         m.register_parameter("recommended_pixel_threshold", nn.Parameter(threshold))
 
+    if gauge_stats is not None:
+        for name, value in (("gauge_baseline", gauge_stats["baseline"]),
+                            ("gauge_scale", gauge_stats["scale"])):
+            m.register_parameter(name, nn.Parameter(value.detach().float(), requires_grad=False))
+        for name, value in (("gauge_mode", GAUGE_MODES[gauge_stats["mode"]]),
+                            ("gauge_rank", gauge_stats["rank"]),
+                            ("gauge_window", gauge_stats["window"])):
+            m.register_parameter(name, nn.Parameter(torch.tensor(float(value)), requires_grad=False))
+
     tensors = torch.jit.script(m)
     tensors.save(path)
 
 
-def load_patchcore_archive(path):
+def load_patchcore_archive(path, with_gauge=False):
     ts = torch.jit.load(path, map_location="cpu")
     params = {key: value.detach() for key, value in ts.named_parameters()}
 
@@ -97,6 +108,8 @@ def load_patchcore_archive(path):
         stats["scale"].requires_grad_(False)
         stats["recommended_pixel_threshold"].requires_grad_(False)
 
+    if with_gauge:
+        return patch_lib, stats, gauge_stats_from_archive(params)
     return patch_lib, stats
 
 def print_tensor(x,num):
@@ -492,6 +505,10 @@ class PatchCore(KNNExtractor):
         score_normalization_smooth_kernel: int = 3,
         score_normalization_threshold_quantile: float = 0.999,
         score_normalization_clamp_min_zero: bool = True,
+        gauge_enabled: bool = False,
+        gauge_rank: int = 8,
+        gauge_window: int = 3,
+        gauge_chunk_size: int = 256,
     ):
         super().__init__(
             backbone_name=backbone_name,
@@ -518,6 +535,12 @@ class PatchCore(KNNExtractor):
         self.score_normalization_threshold_quantile = score_normalization_threshold_quantile
         self.score_normalization_clamp_min_zero = score_normalization_clamp_min_zero
         self.score_stats = None
+        self.gauge_enabled = gauge_enabled
+        self.gauge_rank = gauge_rank
+        self.gauge_window = gauge_window
+        self.gauge_chunk_size = gauge_chunk_size
+        self.gauge_stats = None
+        self.last_gauge_maps = None
 
         self.patch_lib = []
         self.largest_fmap_size = None
@@ -535,6 +558,7 @@ class PatchCore(KNNExtractor):
     def fit(self, train_dl):
         # progress: 10 -> 30
         len_ds = len(train_dl)
+        gauge_maps = []
         for idx, (sample, _) in enumerate(tqdm(train_dl, **get_tqdm_params())):
             feature_maps = self(sample)
             if self.image_shape is None:
@@ -548,6 +572,11 @@ class PatchCore(KNNExtractor):
             # patch = patch[:,:,:,int(0.1*width):int(0.9*width)] #去掉左右10%的patch
             if self.start_pos != 0 or self.end_pos !=0:
                 patch = patch[:, :, :, int(self.start_pos / 8) : int(self.end_pos / 8)]
+
+            if self.gauge_enabled:
+                gauge_maps.append(loop_curvature(
+                    patch, self.gauge_rank, self.gauge_window, self.gauge_chunk_size
+                ).cpu())
             
             patch = patch.permute(0,2,3,1)
             patch = patch.reshape(patch.shape[1],patch.shape[2], -1, patch.shape[-1]) # [H, W, 1, 384]
@@ -617,14 +646,28 @@ class PatchCore(KNNExtractor):
                 print(f"score normalization disabled: {exc}")
                 self.score_stats = None
 
-        save_patchcore_archive(self.results_dir, 'patch_lib.ts', self.patch_lib, self.score_stats)
+        self.gauge_stats = None
+        if self.gauge_enabled:
+            self.gauge_stats = fit_gauge_stats(torch.cat(gauge_maps), self.match_mode)
+            self.gauge_stats.update(rank=self.gauge_rank, window=self.gauge_window)
+        save_patchcore_archive(self.results_dir, 'patch_lib.ts', self.patch_lib,
+                               self.score_stats, self.gauge_stats)
         
     def load(self, path: str,fmap_size: list):
-        self.patch_lib, self.score_stats = load_patchcore_archive(path)
+        self.patch_lib, self.score_stats, self.gauge_stats = load_patchcore_archive(path, with_gauge=True)
         object.__setattr__(self, "resize", torch.nn.AdaptiveAvgPool2d(fmap_size))
         if self.score_stats is None:
             print("score normalization stats not found; using raw PatchCore scores")
         return True
+
+    def compute_gauge_maps(self, patch):
+        """Return raw loop and calibrated node maps; no fusion with PatchCore."""
+        if self.gauge_stats is None:
+            raise ValueError("Gauge statistics are absent; fit with gauge_enabled=True")
+        raw = loop_curvature(patch, self.gauge_stats["rank"],
+                             self.gauge_stats["window"], self.gauge_chunk_size)
+        score = normalize_gauge(raw, self.gauge_stats, self.match_mode)
+        return {"curvature": raw, "score": loops_to_nodes(score)}
 
     def _normalize_score_map_if_available(self, raw_map: torch.Tensor) -> torch.Tensor:
         if not getattr(self, "score_normalization_enabled", True):
@@ -665,6 +708,7 @@ class PatchCore(KNNExtractor):
         fmap_h, fmap_w = patch.shape[-2], patch.shape[-1]  # 记录特征图空间尺寸（裁剪后）
         
         patch = patch.to(device)
+        self.last_gauge_maps = self.compute_gauge_maps(patch) if self.gauge_enabled else None
         patch_lib = self.patch_lib.to(device)
 
         if self.match_mode == "global":
@@ -797,4 +841,7 @@ class PatchCore(KNNExtractor):
             "score_normalization_threshold_quantile": self.score_normalization_threshold_quantile,
             "score_normalization_clamp_min_zero": self.score_normalization_clamp_min_zero,
             "score_normalization_has_stats": self.score_stats is not None,
+            "gauge_enabled": self.gauge_enabled,
+            "gauge_rank": self.gauge_rank,
+            "gauge_window": self.gauge_window,
         })
