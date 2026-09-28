@@ -17,6 +17,7 @@ from sklearn.metrics import roc_auc_score
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from data import Cv2AdaptiveResize, IMAGENET_MEAN, IMAGENET_STD, TransformAdaptiveResize
+from gauge import gauge_stats_from_archive, loop_curvature, loops_to_nodes, normalize_gauge
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp"}
 
@@ -63,7 +64,7 @@ def infer_label_from_path(path):
     return -1
 
 
-def load_patchcore_archive_simple(path):
+def load_patchcore_archive_simple(path, with_gauge=False):
     # 训练归档里主要保存 patch_lib；新版本还会保存每位置的 score baseline/scale。
     # patch_lib 形状约定为 [H, W, N, C]：特征图高、宽、每位置样本数、特征维度。
     ts = torch.jit.load(str(path), map_location="cpu")
@@ -89,6 +90,8 @@ def load_patchcore_archive_simple(path):
         stats["baseline"].requires_grad_(False)
         stats["scale"].requires_grad_(False)
         stats["recommended_pixel_threshold"].requires_grad_(False)
+    if with_gauge:
+        return patch_lib, stats, gauge_stats_from_archive(params)
     return patch_lib, stats
 
 
@@ -275,7 +278,7 @@ def raw_map_by_mode(patch, patch_lib, match_mode, neighbor_radius, lib_pad=None)
 
 
 class PatchCorePredictor:
-    def __init__(self, model_path, backbone="resnet18", out_indices=(2, 3), image_size=(224, 224), fmap_size=None, resize_method="cv2", match_mode="exact_position", neighbor_radius=0, start_pos=0, end_pos=0, device="auto", feature_backend="torch", feature_model=None, output_dir="./results-predict-simple"):
+    def __init__(self, model_path, backbone="resnet18", out_indices=(2, 3), image_size=(224, 224), fmap_size=None, resize_method="cv2", match_mode="exact_position", neighbor_radius=0, start_pos=0, end_pos=0, device="auto", feature_backend="torch", feature_model=None, output_dir="./results-predict-simple", gauge_diagnostics=False, gauge_chunk_size=256):
         self.model_path = Path(model_path)
         self.backbone = backbone
         self.out_indices = tuple(out_indices)
@@ -299,6 +302,10 @@ class PatchCorePredictor:
         self.patch_lib = None
         self.lib_pad = None
         self.score_stats = None
+        self.gauge_stats = None
+        self.gauge_diagnostics = gauge_diagnostics
+        self.gauge_chunk_size = gauge_chunk_size
+        self.last_diagnostics = None
         self.transform = build_transform(self.image_size, self.resize_method)
 
     def load(self):
@@ -318,7 +325,14 @@ class PatchCorePredictor:
             self.feature_extractor.eval().to(self.device)
         else:
             raise ValueError(f"unsupported feature_backend: {self.feature_backend}")
-        self.patch_lib, self.score_stats = load_patchcore_archive_simple(self.model_path)
+        self.patch_lib, self.score_stats, self.gauge_stats = load_patchcore_archive_simple(
+            self.model_path, with_gauge=True
+        )
+        if self.gauge_diagnostics:
+            if self.gauge_stats is None:
+                raise ValueError("archive has no Gauge statistics; train with gauge.enabled=true")
+            if self.gauge_stats["mode"] != self.match_mode:
+                raise ValueError("Gauge calibration mode does not match the predictor match_mode")
         self.patch_lib = self.patch_lib.to(self.device)
         if self.fmap_size is not None:
             self.resize = torch.nn.AdaptiveAvgPool2d(self.fmap_size)
@@ -370,6 +384,21 @@ class PatchCorePredictor:
             lib_pad=self.lib_pad,
         )  # [B, H, W]
         score_maps = select_score_map(raw_maps, self.score_stats, self.match_mode)
+        self.last_diagnostics = None
+        if self.gauge_diagnostics:
+            curvature = loop_curvature(
+                patch, self.gauge_stats["rank"], self.gauge_stats["window"],
+                self.gauge_chunk_size,
+            )
+            gauge_nodes = loops_to_nodes(normalize_gauge(
+                curvature, self.gauge_stats, self.match_mode
+            ))
+            self.last_diagnostics = {
+                "patchcore_raw": raw_maps.detach(),
+                "patchcore_score": score_maps.detach(),
+                "gauge_loop": curvature.detach(),
+                "gauge_score": gauge_nodes.detach(),
+            }
         scores = score_maps.amax(dim=(1, 2)).detach().cpu()
         return scores, score_maps
 
@@ -529,7 +558,8 @@ def write_metrics_json(path, rows):
 @click.option("--vert-gap", default=1, type=int)
 @click.option("--vis-scale", default=0.25, type=float)
 @click.option("--visual", is_flag=True, help="Save visualization images. Disabled by default for faster inference.")
-def cli_interface(model_path, image, input_path, output_dir, backbone, image_size, fmap_size, resize_method, out_indices, match_mode, neighbor_radius, start_pos, end_pos, device, feature_backend, feature_model, big_image, rows, cols, top_margin, bottom_margin, left_margin, right_margin, hori_gap, vert_gap, vis_scale, visual):
+@click.option("--gauge-diagnostics", is_flag=True, help="Save separate PatchCore and Gauge maps to .npz; does not change detection scores.")
+def cli_interface(model_path, image, input_path, output_dir, backbone, image_size, fmap_size, resize_method, out_indices, match_mode, neighbor_radius, start_pos, end_pos, device, feature_backend, feature_model, big_image, rows, cols, top_margin, bottom_margin, left_margin, right_margin, hori_gap, vert_gap, vis_scale, visual, gauge_diagnostics):
     if image is None and input_path is None:
         raise click.UsageError("Provide --image or --input")
     if big_image and (start_pos != 0 or end_pos != 0):
@@ -559,13 +589,14 @@ def cli_interface(model_path, image, input_path, output_dir, backbone, image_siz
         feature_backend=feature_backend,
         feature_model=feature_model,
         output_dir=output_dir,
+        gauge_diagnostics=gauge_diagnostics,
     ).load()
 
     images = [image] if image is not None else collect_images(input_path)
     score_rows = []
     all_tile_rows = []
     output_dir.mkdir(parents=True, exist_ok=True)
-    for image_path in images:
+    for index, image_path in enumerate(images):
         if big_image:
             src_image, score, score_map, elapsed_ms, tile_rows = predictor.predict_big_image(
                 image_path,
@@ -583,6 +614,12 @@ def cli_interface(model_path, image, input_path, output_dir, backbone, image_siz
                 all_tile_rows.append(tile_row)
         else:
             src_image, score, score_map, elapsed_ms = predictor.predict_image(image_path)
+        if gauge_diagnostics:
+            np.savez_compressed(
+                output_dir / f"{index:05d}_{image_path.stem}_gauge.npz",
+                **{key: value.float().cpu().numpy()
+                   for key, value in predictor.last_diagnostics.items()},
+            )
         label = infer_label_from_path(image_path)
         result_path = ""
         if visual:

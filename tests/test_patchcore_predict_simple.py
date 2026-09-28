@@ -13,6 +13,7 @@ if str(INDAD) not in sys.path:
 
 from patchcore_predict_simple import collect_images, infer_label_from_path, load_patchcore_archive_simple, parse_pair
 from models import save_patchcore_archive, save_tensor
+from gauge import fit_gauge_stats
 
 
 def test_parse_pair_reads_width_height():
@@ -75,6 +76,16 @@ def test_load_patchcore_archive_simple_supports_new_archive(tmp_path):
     assert torch.allclose(loaded_stats["scale"], stats["scale"])
 
 
+def test_simple_archive_loads_optional_gauge_stats(tmp_path):
+    normal = fit_gauge_stats(torch.rand(5, 3, 3), "global")
+    normal.update(rank=2, window=3)
+    save_patchcore_archive(str(tmp_path), "gauge.ts", torch.randn(4, 4, 2, 4),
+                           gauge_stats=normal)
+    _, _, loaded = load_patchcore_archive_simple(tmp_path / "gauge.ts", with_gauge=True)
+    assert loaded["mode"] == "global"
+    assert torch.allclose(loaded["scale"], normal["scale"])
+
+
 from patchcore_predict_simple import (
     apply_score_stats,
     parse_model_info_simple,
@@ -115,6 +126,25 @@ def test_predictor_device_can_be_forced_to_cpu():
     predictor = PatchCorePredictor("dummy.ts", device="cpu")
 
     assert predictor.device.type == "cpu"
+
+
+def test_predictor_gauge_diagnostics_preserve_patchcore_scores():
+    features = torch.randn(2, 4, 4, 4)
+    library = torch.randn(4, 4, 2, 4)
+    plain = PatchCorePredictor("dummy.ts", device="cpu", neighbor_radius=0)
+    gauge = PatchCorePredictor("dummy.ts", device="cpu", neighbor_radius=0,
+                               gauge_diagnostics=True)
+    for predictor in (plain, gauge):
+        predictor.extract_patch = lambda batch: features
+        predictor.patch_lib = library
+    gauge.gauge_stats = fit_gauge_stats(torch.rand(5, 3, 3), "exact_position")
+    gauge.gauge_stats.update(rank=2, window=3)
+    baseline_scores, baseline_maps = plain.predict_batch_tensor(features)
+    scores, maps = gauge.predict_batch_tensor(features)
+    assert torch.allclose(scores, baseline_scores)
+    assert torch.allclose(maps, baseline_maps)
+    assert gauge.last_diagnostics["gauge_score"].shape == (2, 4, 4)
+    assert gauge.last_diagnostics["gauge_loop"].shape == (2, 3, 3)
 
 
 def test_predictor_crop_patch_width_by_start_end():
